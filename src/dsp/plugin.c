@@ -26,6 +26,30 @@ static const char *AMB_MODE_NAMES[AMB_MODE_COUNT] = {
 };
 
 typedef struct {
+    float mix, loop_layer, grain_size, scatter;
+    float micro_hold, decay, mod_depth, mod_rate;
+} amb_preset_t;
+
+/* Mode preset values — see docs/plans/2026-05-22-ambiotica-design.md §2.
+ * Selecting a mode atomically overwrites these eight knob values. Capture
+ * buffers (looper / granular / microloop) are intentionally preserved
+ * across mode switches so audio doesn't dump. */
+static const amb_preset_t AMB_PRESETS[AMB_MODE_COUNT] = {
+    /* Loona — clean rolling-capture loops, short reverb. */
+    { .mix = 0.50f, .loop_layer = 0.70f, .grain_size = 0.90f, .scatter = 0.05f,
+      .micro_hold = 0.10f, .decay = 0.30f, .mod_depth = 0.15f, .mod_rate = 0.20f },
+    /* Mismember — chaotic glitch / pointillistic texture. */
+    { .mix = 0.50f, .loop_layer = 0.40f, .grain_size = 0.25f, .scatter = 0.80f,
+      .micro_hold = 0.20f, .decay = 0.50f, .mod_depth = 0.50f, .mod_rate = 0.60f },
+    /* NAPS — frozen-breath sound under lush tail. */
+    { .mix = 0.50f, .loop_layer = 0.20f, .grain_size = 0.80f, .scatter = 0.20f,
+      .micro_hold = 0.65f, .decay = 0.80f, .mod_depth = 0.25f, .mod_rate = 0.15f },
+    /* Flow — pure modulated reverb, no capture/grain. */
+    { .mix = 0.50f, .loop_layer = 0.00f, .grain_size = 0.10f, .scatter = 0.00f,
+      .micro_hold = 0.00f, .decay = 0.95f, .mod_depth = 0.70f, .mod_rate = 0.10f },
+};
+
+typedef struct {
     float mix;
     float loop_layer;
     float grain_size;
@@ -321,7 +345,27 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
     }
     if (strcmp(key, "mode") == 0) {
         int m = atoi(val);
-        inst->mode = (m < 0 ? 0 : (m >= AMB_MODE_COUNT ? AMB_MODE_COUNT - 1 : m));
+        m = (m < 0 ? 0 : (m >= AMB_MODE_COUNT ? AMB_MODE_COUNT - 1 : m));
+        inst->mode = m;
+        /* Atomic 8-knob preset — overwrite values AND push to each stage.
+         * Capture buffers are preserved so the loop / freeze / grain
+         * material in flight survives the mode change. */
+        const amb_preset_t *p = &AMB_PRESETS[m];
+        inst->mix        = p->mix;
+        inst->loop_layer = p->loop_layer;
+        inst->grain_size = p->grain_size;
+        inst->scatter    = p->scatter;
+        inst->micro_hold = p->micro_hold;
+        inst->decay      = p->decay;
+        inst->mod_depth  = p->mod_depth;
+        inst->mod_rate   = p->mod_rate;
+        looper_set_layer(inst->looper, inst->loop_layer);
+        granular_set_grain_size(inst->granular, inst->grain_size);
+        granular_set_scatter(inst->granular, inst->scatter);
+        microloop_set_hold(inst->microloop, inst->micro_hold);
+        reverb_set_decay(inst->reverb, inst->decay);
+        reverb_set_mod_depth(inst->reverb, inst->mod_depth);
+        reverb_set_mod_rate(inst->reverb, inst->mod_rate);
         return;
     }
 }
