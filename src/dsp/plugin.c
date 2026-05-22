@@ -5,7 +5,11 @@
  * DSP stages (looper, granular, microloop, reverb) land in subsequent phases.
  */
 #include "audio_fx_api_v2.h"
+#include "looper.h"
 #include "reverb.h"
+
+#define AMB_SAMPLE_RATE 44100
+#define AMB_LOOPER_SECONDS 30
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -38,7 +42,9 @@ typedef struct {
 
     int   mode;
 
-    /* Stage 4 — reverb. Stages 1–3 land in later phases. */
+    /* Stage 1 — looper. Stages 2–3 land in phases 5–6. */
+    looper_t *looper;
+    /* Stage 4 — reverb. */
     reverb_t *reverb;
 } amb_instance_t;
 
@@ -85,8 +91,12 @@ static void* amb_create(const char *module_dir, const char *config_json) {
     inst->mod_rate = 0.20f;
     inst->mode = 0;
 
+    inst->looper = looper_create(AMB_LOOPER_SECONDS * AMB_SAMPLE_RATE);
+    if (!inst->looper) { free(inst); return NULL; }
+    looper_set_layer(inst->looper, inst->loop_layer);
+
     inst->reverb = reverb_create();
-    if (!inst->reverb) { free(inst); return NULL; }
+    if (!inst->reverb) { looper_destroy(inst->looper); free(inst); return NULL; }
     reverb_set_decay(inst->reverb, inst->decay);
     reverb_set_mod_depth(inst->reverb, inst->mod_depth);
     reverb_set_mod_rate(inst->reverb, inst->mod_rate);
@@ -96,35 +106,45 @@ static void* amb_create(const char *module_dir, const char *config_json) {
 static void amb_destroy(void *vp) {
     amb_instance_t *inst = (amb_instance_t*)vp;
     if (!inst) return;
+    looper_destroy(inst->looper);
     reverb_destroy(inst->reverb);
     free(inst);
 }
 
-/* --- Audio: reverb (stage 4) wet/dry, stages 1–3 passthrough --- */
+/* --- Audio chain: looper -> [stage2,3 passthrough] -> reverb -> dry/wet mix --- */
 
 static void amb_process(void *vp, int16_t *audio_inout, int frames) {
     amb_instance_t *inst = (amb_instance_t*)vp;
-    if (!inst || !inst->reverb || frames <= 0) return;
+    if (!inst || !inst->reverb || !inst->looper || frames <= 0) return;
 
     /* Block-local float buffers. process_block is invoked sequentially from
      * the SPI callback thread, so static reuse is safe even with multiple
      * Ambiotica instances. */
-    static float in_l[256], in_r[256];
+    static float dry_l[256], dry_r[256];
+    static float stage_l[256], stage_r[256];
     static float wet_l[256], wet_r[256];
     if (frames > 256) frames = 256;
 
+    /* Int16 -> float, preserve dry for final mix. */
     for (int i = 0; i < frames; i++) {
-        in_l[i] = audio_inout[2*i + 0] * (1.0f / 32768.0f);
-        in_r[i] = audio_inout[2*i + 1] * (1.0f / 32768.0f);
+        dry_l[i] = audio_inout[2*i + 0] * (1.0f / 32768.0f);
+        dry_r[i] = audio_inout[2*i + 1] * (1.0f / 32768.0f);
     }
 
-    reverb_process(inst->reverb, in_l, in_r, wet_l, wet_r, frames);
+    /* Stage 1: Looper. */
+    looper_process(inst->looper, dry_l, dry_r, stage_l, stage_r, frames);
 
+    /* Stages 2–3 still passthrough; stage_l/stage_r feed reverb directly. */
+
+    /* Stage 4: Reverb. */
+    reverb_process(inst->reverb, stage_l, stage_r, wet_l, wet_r, frames);
+
+    /* Final dry/wet against the original input. */
     const float mix = inst->mix;
     const float dry_g = 1.0f - mix;
     for (int i = 0; i < frames; i++) {
-        float l = dry_g * in_l[i] + mix * wet_l[i];
-        float r = dry_g * in_r[i] + mix * wet_r[i];
+        float l = dry_g * dry_l[i] + mix * wet_l[i];
+        float r = dry_g * dry_r[i] + mix * wet_r[i];
         if (l >  1.0f) l =  1.0f; else if (l < -1.0f) l = -1.0f;
         if (r >  1.0f) r =  1.0f; else if (r < -1.0f) r = -1.0f;
         audio_inout[2*i + 0] = (int16_t)(l * 32767.0f);
@@ -137,7 +157,7 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
 static void amb_set_state(amb_instance_t *inst, const char *val) {
     float f; int i;
     if (json_get_float(val, "mix",         &f) == 0) inst->mix = f;
-    if (json_get_float(val, "loop_layer",  &f) == 0) inst->loop_layer = f;
+    if (json_get_float(val, "loop_layer",  &f) == 0) { inst->loop_layer = f; looper_set_layer(inst->looper, f); }
     if (json_get_float(val, "grain_size",  &f) == 0) inst->grain_size = f;
     if (json_get_float(val, "scatter",     &f) == 0) inst->scatter = f;
     if (json_get_float(val, "micro_hold",  &f) == 0) inst->micro_hold = f;
@@ -160,7 +180,17 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
     if (!inst || !key || !val) return;
     if (strcmp(key, "state") == 0)         { amb_set_state(inst, val); return; }
     if (strcmp(key, "mix") == 0)           { inst->mix = (float)atof(val); return; }
-    if (strcmp(key, "loop_layer") == 0)    { inst->loop_layer = (float)atof(val); return; }
+    if (strcmp(key, "loop_layer") == 0)    {
+        inst->loop_layer = (float)atof(val);
+        looper_set_layer(inst->looper, inst->loop_layer);
+        return;
+    }
+    if (strcmp(key, "loop_clear") == 0)    {
+        /* One-shot: any truthy value clears the loop buffer. Wired to the
+         * Loop Layer knob's double-tap by phase 8. */
+        if (atoi(val) != 0) looper_clear(inst->looper);
+        return;
+    }
     if (strcmp(key, "grain_size") == 0)    { inst->grain_size = (float)atof(val); return; }
     if (strcmp(key, "scatter") == 0)       { inst->scatter = (float)atof(val); return; }
     if (strcmp(key, "micro_hold") == 0)    { inst->micro_hold = (float)atof(val); return; }

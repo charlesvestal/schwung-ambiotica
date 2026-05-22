@@ -30,6 +30,7 @@ ${CROSS_PREFIX}gcc -O3 -shared -fPIC \
     -DNDEBUG \
     -Isrc/dsp \
     src/dsp/plugin.c \
+    src/dsp/looper.c \
     src/dsp/reverb.c \
     src/dsp/lfo.c \
     -o build/ambiotica.so \
