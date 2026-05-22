@@ -675,3 +675,12 @@ audio_fx_api_v2_t* move_audio_fx_init_v2(const host_api_v1_t *host) {
     g_host = host;
     return &API;
 }
+
+/* The chain_host loads FX MIDI handlers via dlsym("move_audio_fx_on_midi")
+ * — separate from the API struct. Export a thin wrapper so MIDI clock /
+ * notes actually reach our amb_on_midi (otherwise fx_on_midi[slot] is NULL
+ * and we never see clock ticks). */
+__attribute__((visibility("default")))
+void move_audio_fx_on_midi(void *instance, const uint8_t *msg, int len, int source) {
+    amb_on_midi(instance, msg, len, source);
+}
