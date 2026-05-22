@@ -26,7 +26,18 @@ struct looper_s {
 };
 
 #define LOOPER_SMOOTH_COEF   0.9989f  /* ~20 ms time constant @ 44.1 kHz */
-#define LOOPER_CROSSFADE_LEN 512      /* ~11.6 ms equal-power crossfade */
+#define LOOPER_CROSSFADE_LEN 512      /* ~11.6 ms linear crossfade */
+
+/* Padé-3 tanh approximation — smooth soft-saturation for the feedback path.
+ * Cheap (5 muls + 2 adds inside range) and bounded to ±1.0. Replaces hard
+ * clip which produced clicky edges when sustained input + fb=1 saturated
+ * the buffer. */
+static inline float soft_sat(float x) {
+    if (x >  3.0f) return  1.0f;
+    if (x < -3.0f) return -1.0f;
+    float x2 = x * x;
+    return x * (27.0f + x2) / (27.0f + 9.0f * x2);
+}
 
 looper_t* looper_create(int buf_capacity_samples) {
     if (buf_capacity_samples <= 0) return NULL;
@@ -105,17 +116,19 @@ void looper_process(looper_t *l,
         float loopL = l->buf_L[read_pos_a];
         float loopR = l->buf_R[read_pos_a];
 
-        /* During crossfade, blend with read at the pending loop_len. */
+        /* During crossfade, blend with read at the pending loop_len.
+         * Linear (gain-equal) crossfade — the two read positions are highly
+         * correlated (same buffer, shifted by a few samples) so equal-power
+         * cosine/sine causes a 3 dB hump mid-fade. Linear stays flat. */
         if (l->crossfade_remaining > 0) {
             int read_pos_b = pos - l->loop_len_pending;
             if (read_pos_b < 0) read_pos_b += cap;
             float loopL_b = l->buf_L[read_pos_b];
             float loopR_b = l->buf_R[read_pos_b];
 
-            float t = (float)(LOOPER_CROSSFADE_LEN - l->crossfade_remaining) *
-                      (1.0f / (float)LOOPER_CROSSFADE_LEN);
-            float gain_a = cosf(t * 1.5707963f);  /* π/2 */
-            float gain_b = sinf(t * 1.5707963f);
+            float gain_b = (float)(LOOPER_CROSSFADE_LEN - l->crossfade_remaining) *
+                           (1.0f / (float)LOOPER_CROSSFADE_LEN);
+            float gain_a = 1.0f - gain_b;
             loopL = gain_a * loopL + gain_b * loopL_b;
             loopR = gain_a * loopR + gain_b * loopR_b;
 
@@ -131,13 +144,11 @@ void looper_process(looper_t *l,
         }
 
         /* Write input + feedback back into the buffer at write_pos.
-         * Soft-clip so the loop can't blow up under sustained input + fb. */
-        float newL = in_l[n] + fb_curr * loopL;
-        float newR = in_r[n] + fb_curr * loopR;
-        if (newL >  1.0f) newL =  1.0f; else if (newL < -1.0f) newL = -1.0f;
-        if (newR >  1.0f) newR =  1.0f; else if (newR < -1.0f) newR = -1.0f;
-        l->buf_L[pos] = newL;
-        l->buf_R[pos] = newR;
+         * Soft-saturate so the loop can't blow up under sustained input + fb
+         * — tanh-style curve instead of hard clip so accumulated buffer
+         * content rolls off smoothly rather than clicking at the ceiling. */
+        l->buf_L[pos] = soft_sat(in_l[n] + fb_curr * loopL);
+        l->buf_R[pos] = soft_sat(in_r[n] + fb_curr * loopR);
 
         /* Output: ONLY the loop signal (no dry). Caller mixes dry separately. */
         out_l[n] = fb_curr * loopL;
