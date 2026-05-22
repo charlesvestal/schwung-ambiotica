@@ -271,19 +271,6 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
         dry_r[i] = audio_inout[2*i + 1] * (1.0f / 32768.0f);
     }
 
-    /* Live BPM tracking — refresh tempo-dependent values on change. */
-    if (g_host && g_host->get_bpm) {
-        float bpm_now = g_host->get_bpm();
-        if (bpm_now > 0.0f &&
-            (inst->last_bpm <= 0.0f ||
-             (bpm_now > inst->last_bpm + 0.5f) ||
-             (bpm_now < inst->last_bpm - 0.5f))) {
-            inst->last_bpm = bpm_now;
-            amb_apply_loop_length(inst);
-            if (inst->mod_sync) amb_apply_mod_rate(inst);
-        }
-    }
-
     /* Stage 1: Looper. Captures dry, outputs only the loop signal. */
     looper_process(inst->looper, dry_l, dry_r, loop_l, loop_r, frames);
 
