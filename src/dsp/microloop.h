@@ -1,17 +1,18 @@
 /* Ambiotica micro-loop — Stage 3 of the chain.
  *
- * 4-second stereo buffer that captures the post-Scatter layered signal and
- * lets the Micro Hold knob layer a delayed/looped copy on top, with smooth
- * transition into freeze.
+ * 4-second stereo buffer. Runs parallel to the looper/granular path:
+ * captures whatever input is fed in (typically the dry signal) and outputs
+ * a delayed/looped copy. Always functional regardless of Loop Layer.
  *
- *   hold = 0   → buffer still captures, but nothing blended (passthrough)
+ *   hold = 0   → silent output (no loop content)
  *   hold low   → short stutter (~50–200 ms)
  *   hold mid   → ~1–2 s sustained layer
  *   hold high  → up to 4 s
  *   hold ≥ 0.95 OR freeze=1  → buffer locked, captured content keeps looping
  *
- * Output is `in + hold * delayed_read` so the upstream signal always flows
- * through cleanly — the micro-loop is an additive freeze layer.
+ * Output is ONLY the loop content (hold × delayed read). The caller adds
+ * dry passthrough separately so the micro-loop can be an additive layer
+ * in the wet bus.
  *
  * Realtime contract: process performs no allocation and no I/O.
  */

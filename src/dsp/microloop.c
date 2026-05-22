@@ -73,9 +73,12 @@ void microloop_process(microloop_t *m,
         float read_L = m->buf_L[read_pos];
         float read_R = m->buf_R[read_pos];
 
-        /* Output: input + hold × delayed read. */
-        out_l[n] = in_l[n] + hold * read_L;
-        out_r[n] = in_r[n] + hold * read_R;
+        /* Output: ONLY the loop content (hold × delayed read).
+         * Caller mixes in dry passthrough separately so micro-loop can sit
+         * parallel to the looper/granular chain — freeze always has the
+         * live signal to capture regardless of Loop Layer. */
+        out_l[n] = hold * read_L;
+        out_r[n] = hold * read_R;
 
         /* Write input + feedback into buffer unless frozen. */
         if (!frozen) {
