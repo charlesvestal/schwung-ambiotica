@@ -163,23 +163,39 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
     /* Stage 2: Granular processes the loop signal only (live signal stays clean). */
     granular_process(inst->granular, loop_l, loop_r, gran_l, gran_r, frames);
 
+    /* Scatter knob is dual-purpose:
+     *   0..0.5  : clean loop at full + shimmer ramping in (layered shimmer)
+     *   0.5..1  : clean loop fades out + shimmer stays full (replaces into destruction)
+     * At 0   : pure clean loop (gran is near-identity anyway, but explicit zero is silent)
+     * At 0.5 : loop + half-shimmer (classic shimmer-on-top)
+     * At 1   : only the heavily scattered version (clean gone, modulated to destruction) */
+    const float scatter   = inst->scatter;
+    const float clean_g   = (scatter <= 0.5f) ? 1.0f : (1.0f - 2.0f * (scatter - 0.5f));
+    const float shimmer_g = scatter;
+
+    static float layered_l[256], layered_r[256];
+    for (int i = 0; i < frames; i++) {
+        layered_l[i] = clean_g * loop_l[i] + shimmer_g * gran_l[i];
+        layered_r[i] = clean_g * loop_r[i] + shimmer_g * gran_r[i];
+    }
+
     /* Stage 3: still passthrough — phase 6. */
 
-    /* Reverb input = dry + grained loop so the tail spans both. */
+    /* Reverb input = dry + (clean loop blended with shimmer). */
     for (int i = 0; i < frames; i++) {
-        rev_in_l[i] = dry_l[i] + gran_l[i];
-        rev_in_r[i] = dry_r[i] + gran_r[i];
+        rev_in_l[i] = dry_l[i] + layered_l[i];
+        rev_in_r[i] = dry_r[i] + layered_r[i];
     }
 
     /* Stage 4: Reverb. */
     reverb_process(inst->reverb, rev_in_l, rev_in_r, wet_l, wet_r, frames);
 
-    /* Final mix: wet bus = grained loop (direct) + reverb tail. */
+    /* Final mix: wet bus = layered (clean + shimmer crossfade) + reverb tail. */
     const float mix = inst->mix;
     const float dry_g = 1.0f - mix;
     for (int i = 0; i < frames; i++) {
-        float wet_bus_l = gran_l[i] + wet_l[i];
-        float wet_bus_r = gran_r[i] + wet_r[i];
+        float wet_bus_l = layered_l[i] + wet_l[i];
+        float wet_bus_r = layered_r[i] + wet_r[i];
         float l = dry_g * dry_l[i] + mix * wet_bus_l;
         float r = dry_g * dry_r[i] + mix * wet_bus_r;
         if (l >  1.0f) l =  1.0f; else if (l < -1.0f) l = -1.0f;
