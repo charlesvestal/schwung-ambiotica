@@ -6,6 +6,7 @@
  */
 #include "audio_fx_api_v2.h"
 #include "looper.h"
+#include "granular.h"
 #include "reverb.h"
 
 #define AMB_SAMPLE_RATE 44100
@@ -42,8 +43,10 @@ typedef struct {
 
     int   mode;
 
-    /* Stage 1 — looper. Stages 2–3 land in phases 5–6. */
+    /* Stage 1 — looper. */
     looper_t *looper;
+    /* Stage 2 — granular. Stage 3 (microloop) lands in phase 6. */
+    granular_t *granular;
     /* Stage 4 — reverb. */
     reverb_t *reverb;
 } amb_instance_t;
@@ -95,8 +98,18 @@ static void* amb_create(const char *module_dir, const char *config_json) {
     if (!inst->looper) { free(inst); return NULL; }
     looper_set_layer(inst->looper, inst->loop_layer);
 
+    inst->granular = granular_create();
+    if (!inst->granular) { looper_destroy(inst->looper); free(inst); return NULL; }
+    granular_set_grain_size(inst->granular, inst->grain_size);
+    granular_set_scatter(inst->granular, inst->scatter);
+    granular_set_glitchy(inst->granular, inst->grain_glitchy);
+
     inst->reverb = reverb_create();
-    if (!inst->reverb) { looper_destroy(inst->looper); free(inst); return NULL; }
+    if (!inst->reverb) {
+        looper_destroy(inst->looper);
+        granular_destroy(inst->granular);
+        free(inst); return NULL;
+    }
     reverb_set_decay(inst->reverb, inst->decay);
     reverb_set_mod_depth(inst->reverb, inst->mod_depth);
     reverb_set_mod_rate(inst->reverb, inst->mod_rate);
@@ -107,6 +120,7 @@ static void amb_destroy(void *vp) {
     amb_instance_t *inst = (amb_instance_t*)vp;
     if (!inst) return;
     looper_destroy(inst->looper);
+    granular_destroy(inst->granular);
     reverb_destroy(inst->reverb);
     free(inst);
 }
@@ -134,9 +148,18 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
     /* Stage 1: Looper. stage_l = dry + loop (feeds chain). */
     looper_process(inst->looper, dry_l, dry_r, stage_l, stage_r, frames);
 
-    /* Stages 2–3 still passthrough; stage_l/stage_r feed reverb directly. */
+    /* Stage 2: Granular replaces stage_l/stage_r in-place via a temp buffer. */
+    static float gran_l[256], gran_r[256];
+    granular_process(inst->granular, stage_l, stage_r, gran_l, gran_r, frames);
+    /* Copy gran back into stage so stage_l is the post-granular signal. */
+    for (int i = 0; i < frames; i++) {
+        stage_l[i] = gran_l[i];
+        stage_r[i] = gran_r[i];
+    }
 
-    /* Stage 4: Reverb processes (dry + loop). */
+    /* Stage 3 still passthrough; stage_l/stage_r feed reverb directly. */
+
+    /* Stage 4: Reverb. */
     reverb_process(inst->reverb, stage_l, stage_r, wet_l, wet_r, frames);
 
     /* Final mix.
@@ -171,14 +194,14 @@ static void amb_set_state(amb_instance_t *inst, const char *val) {
     float f; int i;
     if (json_get_float(val, "mix",         &f) == 0) inst->mix = f;
     if (json_get_float(val, "loop_layer",  &f) == 0) { inst->loop_layer = f; looper_set_layer(inst->looper, f); }
-    if (json_get_float(val, "grain_size",  &f) == 0) inst->grain_size = f;
-    if (json_get_float(val, "scatter",     &f) == 0) inst->scatter = f;
+    if (json_get_float(val, "grain_size",  &f) == 0) { inst->grain_size = f; granular_set_grain_size(inst->granular, f); }
+    if (json_get_float(val, "scatter",     &f) == 0) { inst->scatter = f; granular_set_scatter(inst->granular, f); }
     if (json_get_float(val, "micro_hold",  &f) == 0) inst->micro_hold = f;
     if (json_get_float(val, "decay",       &f) == 0) { inst->decay = f; reverb_set_decay(inst->reverb, f); }
     if (json_get_float(val, "mod_depth",   &f) == 0) { inst->mod_depth = f; reverb_set_mod_depth(inst->reverb, f); }
     if (json_get_float(val, "mod_rate",    &f) == 0) { inst->mod_rate = f; reverb_set_mod_rate(inst->reverb, f); }
     if (json_get_int  (val, "mix_kill_dry",   &i) == 0) inst->mix_kill_dry   = i ? 1 : 0;
-    if (json_get_int  (val, "grain_glitchy",  &i) == 0) inst->grain_glitchy  = i ? 1 : 0;
+    if (json_get_int  (val, "grain_glitchy",  &i) == 0) { inst->grain_glitchy  = i ? 1 : 0; granular_set_glitchy(inst->granular, inst->grain_glitchy); }
     if (json_get_int  (val, "micro_freeze",   &i) == 0) inst->micro_freeze   = i ? 1 : 0;
     if (json_get_int  (val, "decay_infinite", &i) == 0) inst->decay_infinite = i ? 1 : 0;
     if (json_get_int  (val, "mod_sync",       &i) == 0) inst->mod_sync       = i ? 1 : 0;
@@ -204,8 +227,16 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
         if (atoi(val) != 0) looper_clear(inst->looper);
         return;
     }
-    if (strcmp(key, "grain_size") == 0)    { inst->grain_size = (float)atof(val); return; }
-    if (strcmp(key, "scatter") == 0)       { inst->scatter = (float)atof(val); return; }
+    if (strcmp(key, "grain_size") == 0)    {
+        inst->grain_size = (float)atof(val);
+        granular_set_grain_size(inst->granular, inst->grain_size);
+        return;
+    }
+    if (strcmp(key, "scatter") == 0)       {
+        inst->scatter = (float)atof(val);
+        granular_set_scatter(inst->granular, inst->scatter);
+        return;
+    }
     if (strcmp(key, "micro_hold") == 0)    { inst->micro_hold = (float)atof(val); return; }
     if (strcmp(key, "decay") == 0)         {
         inst->decay = (float)atof(val);
@@ -223,7 +254,11 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
         return;
     }
     if (strcmp(key, "mix_kill_dry") == 0)   { inst->mix_kill_dry   = atoi(val) ? 1 : 0; return; }
-    if (strcmp(key, "grain_glitchy") == 0)  { inst->grain_glitchy  = atoi(val) ? 1 : 0; return; }
+    if (strcmp(key, "grain_glitchy") == 0)  {
+        inst->grain_glitchy = atoi(val) ? 1 : 0;
+        granular_set_glitchy(inst->granular, inst->grain_glitchy);
+        return;
+    }
     if (strcmp(key, "micro_freeze") == 0)   { inst->micro_freeze   = atoi(val) ? 1 : 0; return; }
     if (strcmp(key, "decay_infinite") == 0) { inst->decay_infinite = atoi(val) ? 1 : 0; return; }
     if (strcmp(key, "mod_sync") == 0)       { inst->mod_sync       = atoi(val) ? 1 : 0; return; }
