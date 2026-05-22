@@ -5,18 +5,18 @@
 #include <string.h>
 #include <math.h>
 
-#define M_SAMPLE_RATE      44100
-#define M_MIN_LEN_SAMPLES  4410     /* 100 ms @ 44.1 kHz — above phasing range */
-#define M_MAX_LEN_SAMPLES  176400   /* 4 s   @ 44.1 kHz */
-#define M_AUTO_FREEZE      0.95f    /* knob threshold for auto-engaged freeze */
-#define M_SMOOTH_COEF      0.9989f  /* ~20 ms time constant @ 44.1 kHz */
+#define M_SAMPLE_RATE       44100
+#define M_MIN_LEN_SAMPLES   4410     /* 100 ms @ 44.1 kHz — above phasing range */
+#define M_MAX_LEN_SAMPLES   176400   /* 4 s   @ 44.1 kHz */
+#define M_AUTO_FREEZE       0.95f    /* knob threshold for auto-engaged freeze */
+#define M_SMOOTH_COEF       0.9989f  /* ~20 ms — for fb / out_gain */
+#define M_LEN_SMOOTH_COEF   0.99955f /* ~50 ms — for loop_len so transitions are gentle pitch glides not clicks */
 
 struct microloop_s {
     float *buf_L;
     float *buf_R;
     int    buf_capacity;
     int    write_pos;
-    int    loop_len;
     float  hold;       /* 0..1 — both loop length and blend amount */
     int    freeze;     /* external freeze flag (alt-state) */
 
@@ -24,6 +24,8 @@ struct microloop_s {
      * changes don't inject clicks into the feedback buffer. */
     float  fb_target,       fb_current;
     float  out_gain_target, out_gain_current;
+    float  loop_len_target;     /* integer count, but float for smoothing */
+    float  loop_len_current;    /* fractional read position offset */
 };
 
 microloop_t* microloop_create(void) {
@@ -33,7 +35,8 @@ microloop_t* microloop_create(void) {
     m->buf_L = (float*)calloc((size_t)m->buf_capacity, sizeof(float));
     m->buf_R = (float*)calloc((size_t)m->buf_capacity, sizeof(float));
     if (!m->buf_L || !m->buf_R) { microloop_destroy(m); return NULL; }
-    m->loop_len = M_MIN_LEN_SAMPLES;
+    m->loop_len_target  = (float)M_MIN_LEN_SAMPLES;
+    m->loop_len_current = (float)M_MIN_LEN_SAMPLES;
     m->hold = 0.0f;
     m->freeze = 0;
     return m;
@@ -60,7 +63,7 @@ void microloop_set_hold(microloop_t *m, float hold_0_1) {
     int len = (int)expf(exponent);
     if (len < M_MIN_LEN_SAMPLES) len = M_MIN_LEN_SAMPLES;
     if (len > M_MAX_LEN_SAMPLES) len = M_MAX_LEN_SAMPLES;
-    m->loop_len = len;
+    m->loop_len_target = (float)len;
 
     /* Update smoothing targets. process() ramps current → target per sample. */
     m->out_gain_target = sqrtf(hold_0_1);
@@ -81,26 +84,39 @@ void microloop_process(microloop_t *m,
     if (!m || frames <= 0) return;
     /* Auto-engage freeze when knob approaches max, OR if alt-state demands it. */
     const int frozen = m->freeze || (m->hold >= M_AUTO_FREEZE);
-    const int loop_len = m->loop_len;
     const int buf_capacity = m->buf_capacity;
     int write_pos = m->write_pos;
 
     /* Smoothed values — ramp per sample toward target. */
-    float fb_curr  = m->fb_current;
-    float out_curr = m->out_gain_current;
+    float fb_curr   = m->fb_current;
+    float out_curr  = m->out_gain_current;
+    float len_curr  = m->loop_len_current;
     const float fb_t  = m->fb_target;
     const float out_t = m->out_gain_target;
+    const float len_t = m->loop_len_target;
     const float c     = M_SMOOTH_COEF;
     const float ic    = 1.0f - c;
+    const float lc    = M_LEN_SMOOTH_COEF;
+    const float lic   = 1.0f - lc;
 
     for (int n = 0; n < frames; n++) {
-        fb_curr  = c * fb_curr  + ic * fb_t;
-        out_curr = c * out_curr + ic * out_t;
+        fb_curr  = c  * fb_curr  + ic  * fb_t;
+        out_curr = c  * out_curr + ic  * out_t;
+        len_curr = lc * len_curr + lic * len_t;
 
-        int read_pos = write_pos - loop_len;
+        /* Fractional delay read — linearly interpolate between the two
+         * adjacent samples so smoothed loop_len changes don't click. */
+        float ldelay = len_curr;
+        if (ldelay < 1.0f) ldelay = 1.0f;
+        if (ldelay > (float)(buf_capacity - 1)) ldelay = (float)(buf_capacity - 1);
+        int   li = (int)ldelay;
+        float lf = ldelay - (float)li;
+        int read_pos = write_pos - li;
         if (read_pos < 0) read_pos += buf_capacity;
-        float read_L = m->buf_L[read_pos];
-        float read_R = m->buf_R[read_pos];
+        int read_pos_back = read_pos - 1;
+        if (read_pos_back < 0) read_pos_back += buf_capacity;
+        float read_L = m->buf_L[read_pos] * (1.0f - lf) + m->buf_L[read_pos_back] * lf;
+        float read_R = m->buf_R[read_pos] * (1.0f - lf) + m->buf_R[read_pos_back] * lf;
 
         /* Output: ONLY the loop content. Caller mixes in dry passthrough. */
         out_l[n] = out_curr * read_L;
@@ -122,4 +138,5 @@ void microloop_process(microloop_t *m,
     m->write_pos = write_pos;
     m->fb_current = fb_curr;
     m->out_gain_current = out_curr;
+    m->loop_len_current = len_curr;
 }
