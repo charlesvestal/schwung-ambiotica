@@ -25,6 +25,16 @@ void      reverb_set_mod_depth(reverb_t *r, float depth_0_1);
 /* rate_0_1: 0 = 0.05 Hz (very slow drift), 1 = 8 Hz (chorus-fast). Log-mapped. */
 void      reverb_set_mod_rate(reverb_t *r, float rate_0_1);
 
+/* Direct Hz rate — used by tempo-synced mod where the host computes
+ * Hz = bpm × beat_division. Bypasses the knob curve. */
+void      reverb_set_mod_rate_hz(reverb_t *r, float hz);
+
+/* Shape: 0=sine, 1=warp (DC-biased up), 2=sink (DC-biased down). */
+void      reverb_set_mod_shape(reverb_t *r, int shape);
+
+/* Force feedback to ~1.0 when nonzero (∞ Decay perf shortcut). */
+void      reverb_set_decay_infinite(reverb_t *r, int infinite);
+
 /* Process stereo float buffers. in and out may NOT alias (in is read first
  * for the whole block via mono-sum; safest to use separate buffers). */
 void      reverb_process(reverb_t *r,

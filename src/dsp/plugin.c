@@ -91,8 +91,36 @@ typedef struct {
     reverb_t *reverb;
 } amb_instance_t;
 
-/* Forward declaration — applies the current bars setting + BPM to looper. */
+/* Forward declarations. */
 static void amb_apply_loop_length(amb_instance_t *inst);
+static void amb_apply_mod_rate(amb_instance_t *inst);
+
+/* Beat divisions for tempo-synced mod rate (slow → fast). */
+static const float AMB_SYNC_BEATS[6] = {
+    4.0f, 2.0f, 1.0f, 0.5f, 0.25f, 0.125f  /* 1 bar, 1/2, 1/4, 1/8, 1/16, 1/32 */
+};
+#define AMB_SYNC_BEATS_COUNT 6
+
+/* Compute mod rate: if mod_sync, use beat-division from knob × BPM; else
+ * free-running log-mapped Hz from knob. Pushes the result into reverb. */
+static void amb_apply_mod_rate(amb_instance_t *inst) {
+    if (!inst || !inst->reverb) return;
+    if (inst->mod_sync) {
+        float bpm = AMB_DEFAULT_BPM;
+        if (g_host && g_host->get_bpm) {
+            float b = g_host->get_bpm();
+            if (b > 0.0f) bpm = b;
+        }
+        int idx = (int)(inst->mod_rate * (float)AMB_SYNC_BEATS_COUNT);
+        if (idx < 0) idx = 0;
+        if (idx >= AMB_SYNC_BEATS_COUNT) idx = AMB_SYNC_BEATS_COUNT - 1;
+        float beats_per_cycle = AMB_SYNC_BEATS[idx];
+        float hz = bpm / (60.0f * beats_per_cycle);
+        reverb_set_mod_rate_hz(inst->reverb, hz);
+    } else {
+        reverb_set_mod_rate(inst->reverb, inst->mod_rate);
+    }
+}
 
 /* Apply loop_length_bars × current BPM to looper's active loop length. */
 static void amb_apply_loop_length(amb_instance_t *inst) {
@@ -272,8 +300,9 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
     reverb_process(inst->reverb, rev_in_l, rev_in_r, wet_l, wet_r, frames);
 
     /* Final mix: wet bus = layered + micro + reverb tail.
-     * Smooth the Mix knob per-sample so abrupt knob changes don't click. */
-    const float mix_target = inst->mix;
+     * Smooth the Mix knob per-sample so abrupt knob changes don't click.
+     * mix_kill_dry forces all-wet (dry_g = 0) regardless of Mix knob. */
+    const float mix_target = inst->mix_kill_dry ? 1.0f : inst->mix;
     float mix_curr = inst->mix_current;
     const float c = 0.9989f;  /* ~20 ms time constant */
     const float ic = 1.0f - c;
@@ -307,10 +336,18 @@ static void amb_set_state(amb_instance_t *inst, const char *val) {
     if (json_get_int  (val, "mix_kill_dry",   &i) == 0) inst->mix_kill_dry   = i ? 1 : 0;
     if (json_get_int  (val, "grain_glitchy",  &i) == 0) { inst->grain_glitchy  = i ? 1 : 0; granular_set_glitchy(inst->granular, inst->grain_glitchy); }
     if (json_get_int  (val, "micro_freeze",   &i) == 0) { inst->micro_freeze   = i ? 1 : 0; microloop_set_freeze(inst->microloop, inst->micro_freeze); }
-    if (json_get_int  (val, "decay_infinite", &i) == 0) inst->decay_infinite = i ? 1 : 0;
-    if (json_get_int  (val, "mod_sync",       &i) == 0) inst->mod_sync       = i ? 1 : 0;
-    if (json_get_int  (val, "mod_shape",      &i) == 0)
+    if (json_get_int  (val, "decay_infinite", &i) == 0) {
+        inst->decay_infinite = i ? 1 : 0;
+        reverb_set_decay_infinite(inst->reverb, inst->decay_infinite);
+    }
+    if (json_get_int  (val, "mod_sync",       &i) == 0) {
+        inst->mod_sync = i ? 1 : 0;
+        amb_apply_mod_rate(inst);
+    }
+    if (json_get_int  (val, "mod_shape",      &i) == 0) {
         inst->mod_shape = (i < 0 ? 0 : (i > 2 ? 2 : i));
+        reverb_set_mod_shape(inst->reverb, inst->mod_shape);
+    }
     if (json_get_int  (val, "mode",           &i) == 0)
         inst->mode = (i < 0 ? 0 : (i >= AMB_MODE_COUNT ? AMB_MODE_COUNT - 1 : i));
     if (json_get_float(val, "loop_length",    &f) == 0) {
@@ -373,10 +410,13 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
     }
     if (strcmp(key, "mod_rate") == 0)      {
         inst->mod_rate = (float)atof(val);
-        reverb_set_mod_rate(inst->reverb, inst->mod_rate);
+        amb_apply_mod_rate(inst);
         return;
     }
-    if (strcmp(key, "mix_kill_dry") == 0)   { inst->mix_kill_dry   = atoi(val) ? 1 : 0; return; }
+    if (strcmp(key, "mix_kill_dry") == 0)   {
+        inst->mix_kill_dry = atoi(val) ? 1 : 0;
+        return;
+    }
     if (strcmp(key, "grain_glitchy") == 0)  {
         inst->grain_glitchy = atoi(val) ? 1 : 0;
         granular_set_glitchy(inst->granular, inst->grain_glitchy);
@@ -387,10 +427,21 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
         microloop_set_freeze(inst->microloop, inst->micro_freeze);
         return;
     }
-    if (strcmp(key, "decay_infinite") == 0) { inst->decay_infinite = atoi(val) ? 1 : 0; return; }
-    if (strcmp(key, "mod_sync") == 0)       { inst->mod_sync       = atoi(val) ? 1 : 0; return; }
+    if (strcmp(key, "decay_infinite") == 0) {
+        inst->decay_infinite = atoi(val) ? 1 : 0;
+        reverb_set_decay_infinite(inst->reverb, inst->decay_infinite);
+        return;
+    }
+    if (strcmp(key, "mod_sync") == 0)       {
+        inst->mod_sync = atoi(val) ? 1 : 0;
+        amb_apply_mod_rate(inst);
+        return;
+    }
     if (strcmp(key, "mod_shape") == 0) {
-        int s = atoi(val); inst->mod_shape = (s < 0 ? 0 : (s > 2 ? 2 : s)); return;
+        int s = atoi(val);
+        inst->mod_shape = (s < 0 ? 0 : (s > 2 ? 2 : s));
+        reverb_set_mod_shape(inst->reverb, inst->mod_shape);
+        return;
     }
     if (strcmp(key, "mode") == 0) {
         int m = atoi(val);

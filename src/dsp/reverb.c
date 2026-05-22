@@ -79,6 +79,11 @@ struct reverb_s {
     lfo_t lfo[R_COMB];
     float base_rate_hz;       /* user-set rate before per-comb multiplication */
     float mod_depth_target,    mod_depth_current;  /* 0..R_MOD_HEADROOM/2 */
+    int   mod_shape;           /* 0=sine, 1=warp, 2=sink */
+
+    /* Performance shortcuts. */
+    int   decay_infinite;      /* when 1, fb_target → 1.0 */
+    float fb_decay_setting;    /* preserves the decay-knob feedback for restore */
 };
 
 #define R_SMOOTH_COEF 0.9989f  /* ~20 ms time constant @ 44.1 kHz */
@@ -113,6 +118,9 @@ reverb_t* reverb_create(void) {
     r->base_rate_hz = 0.3f;
     r->mod_depth_target = 0.0f;
     r->mod_depth_current = 0.0f;
+    r->mod_shape = 0;
+    r->decay_infinite = 0;
+    r->fb_decay_setting = r->fb_target;
     for (int i = 0; i < R_COMB; i++) {
         lfo_init(&r->lfo[i], R_SAMPLE_RATE);
         lfo_set_phase(&r->lfo[i], R_COMB_PHASE[i]);
@@ -133,7 +141,15 @@ void reverb_set_decay(reverb_t *r, float decay_0_1) {
     if (decay_0_1 < 0.0f) decay_0_1 = 0.0f;
     if (decay_0_1 > 1.0f) decay_0_1 = 1.0f;
     float curve = powf(decay_0_1, 0.4f);
-    r->fb_target = 0.50f + 0.49f * curve;
+    r->fb_decay_setting = 0.50f + 0.49f * curve;
+    /* If ∞ Decay shortcut is on, leave fb_target at 1.0; otherwise apply. */
+    if (!r->decay_infinite) r->fb_target = r->fb_decay_setting;
+}
+
+void reverb_set_decay_infinite(reverb_t *r, int infinite) {
+    if (!r) return;
+    r->decay_infinite = infinite ? 1 : 0;
+    r->fb_target = r->decay_infinite ? 1.0f : r->fb_decay_setting;
 }
 
 void reverb_set_mod_depth(reverb_t *r, float depth_0_1) {
@@ -158,6 +174,22 @@ void reverb_set_mod_rate(reverb_t *r, float rate_0_1) {
     for (int i = 0; i < R_COMB; i++) {
         lfo_set_rate_hz(&r->lfo[i], r->base_rate_hz * R_COMB_RATE_MULT[i]);
     }
+}
+
+void reverb_set_mod_rate_hz(reverb_t *r, float hz) {
+    if (!r) return;
+    if (hz < 0.0f) hz = 0.0f;
+    r->base_rate_hz = hz;
+    for (int i = 0; i < R_COMB; i++) {
+        lfo_set_rate_hz(&r->lfo[i], r->base_rate_hz * R_COMB_RATE_MULT[i]);
+    }
+}
+
+void reverb_set_mod_shape(reverb_t *r, int shape) {
+    if (!r) return;
+    if (shape < 0) shape = 0;
+    if (shape > 2) shape = 2;
+    r->mod_shape = shape;
 }
 
 static inline float ap_tick(float *buf, int len, int *pos, float g, float x) {
@@ -211,9 +243,11 @@ void reverb_process(reverb_t *r,
         float xR = in_r[n] * in_g;
 
         float sumL = 0.0f, sumR = 0.0f;
+        const int shape = r->mod_shape;
         for (int i = 0; i < R_COMB; i++) {
             /* Each comb advances its own LFO at its own rate. */
-            float mod = lfo_tick_sine(&r->lfo[i]) * mod_curr;
+            float raw_sin = lfo_tick_sine(&r->lfo[i]);
+            float mod = lfo_shape_apply(shape, raw_sin) * mod_curr;
 
             /* L comb */
             float dL = (float)R_COMB_BASE[i] + mod;

@@ -38,3 +38,18 @@ float lfo_sine_at_offset(const lfo_t *lfo, float radian_offset) {
     if (!lfo) return 0.0f;
     return sinf(lfo->phase + radian_offset);
 }
+
+float lfo_shape_apply(int shape, float sine) {
+    /* sine ∈ [-1, +1]. Output ∈ [-1, +1] for sine; warp & sink remap to a
+     * unipolar range centered on a DC offset that biases the modulation in
+     * one direction. */
+    switch (shape) {
+        case 1:  /* Warp: 0..+1, pitch always biased up */
+            return 0.5f * (1.0f + sine);
+        case 2:  /* Sink: -1..0, pitch always biased down */
+            return 0.5f * (sine - 1.0f);
+        case 0:
+        default:
+            return sine;
+    }
+}
