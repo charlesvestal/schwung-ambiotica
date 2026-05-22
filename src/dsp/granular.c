@@ -1,5 +1,6 @@
 /* Granular stage — 8-grain scheduler over a 2s capture ring. */
 #include "granular.h"
+#include "lfo.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -49,6 +50,11 @@ struct granular_s {
     /* Params */
     float grain_size_0_1;
     float scatter_0_1;
+
+    /* LFO modulation — wobbles each active grain's pitch in sync with
+     * reverb's mod, giving coherent breathing across both stages. */
+    lfo_t mod_lfo;
+    float mod_depth_cents;   /* 0..100 cents (1 semitone) at full depth */
 
     /* LCG RNG */
     uint32_t rng;
@@ -130,6 +136,9 @@ granular_t* granular_create(void) {
     if (!g->buf_L || !g->buf_R) { granular_destroy(g); return NULL; }
     g->grain_size_0_1 = 0.5f;
     g->scatter_0_1 = 0.0f;
+    lfo_init(&g->mod_lfo, G_SAMPLE_RATE);
+    lfo_set_rate_hz(&g->mod_lfo, 0.3f);
+    g->mod_depth_cents = 0.0f;
     g->rng = 0x12345678u;
     g->samples_to_next = current_grain_length(g) / 2;
     return g;
@@ -156,6 +165,19 @@ void granular_set_scatter(granular_t *g, float scatter_0_1) {
     g->scatter_0_1 = scatter_0_1;
 }
 
+void granular_set_mod_depth(granular_t *g, float depth_0_1) {
+    if (!g) return;
+    if (depth_0_1 < 0.0f) depth_0_1 = 0.0f;
+    if (depth_0_1 > 1.0f) depth_0_1 = 1.0f;
+    g->mod_depth_cents = depth_0_1 * 100.0f;
+}
+
+void granular_set_mod_rate_hz(granular_t *g, float hz) {
+    if (!g) return;
+    if (hz < 0.0f) hz = 0.0f;
+    lfo_set_rate_hz(&g->mod_lfo, hz);
+}
+
 void granular_process(granular_t *g,
                       const float *in_l, const float *in_r,
                       float *out_l, float *out_r,
@@ -163,8 +185,14 @@ void granular_process(granular_t *g,
     if (!g || frames <= 0) return;
 
     const int buf_len = g->buf_len;
+    const float mod_cents = g->mod_depth_cents;
 
     for (int n = 0; n < frames; n++) {
+        /* Per-sample shared mod factor (same across all active grains). */
+        float lfo_val = lfo_tick_sine(&g->mod_lfo);
+        float pitch_mod = (mod_cents > 0.0f)
+            ? powf(2.0f, lfo_val * mod_cents * (1.0f / 1200.0f))
+            : 1.0f;
         /* 1. Write current input to capture buffer. */
         g->buf_L[g->write_pos] = in_l[n];
         g->buf_R[g->write_pos] = in_r[n];
@@ -199,8 +227,8 @@ void granular_process(granular_t *g,
             sum_l += yl * env;
             sum_r += yr * env;
 
-            /* Advance grain. */
-            gr->read_pos += gr->read_step;
+            /* Advance grain with shared LFO pitch wobble applied. */
+            gr->read_pos += gr->read_step * pitch_mod;
             if (gr->read_pos >= (float)buf_len) gr->read_pos -= (float)buf_len;
             else if (gr->read_pos < 0.0f) gr->read_pos += (float)buf_len;
             gr->age++;

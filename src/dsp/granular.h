@@ -25,6 +25,15 @@ void        granular_set_grain_size(granular_t *g, float size_0_1);
  * full buffer-wide position randomness. */
 void        granular_set_scatter(granular_t *g, float scatter_0_1);
 
+/* Pitch mod depth — 0 = no pitch wobble, 1 = ±100 cents (1 semitone) sine
+ * modulation on top of each grain's spawn pitch. Shares the chain's Mod LFO
+ * with the reverb's diffusion modulation. */
+void        granular_set_mod_depth(granular_t *g, float depth_0_1);
+
+/* Direct Hz LFO rate — set by plugin to match reverb's base rate so the
+ * grain pitch wobble and reverb breathing share a tempo. */
+void        granular_set_mod_rate_hz(granular_t *g, float hz);
+
 void        granular_process(granular_t *g,
                              const float *in_l, const float *in_r,
                              float *out_l, float *out_r,

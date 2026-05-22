@@ -84,6 +84,10 @@ struct reverb_s {
     /* Input highpass — stops sub-80-Hz energy from piling up in the comb
      * feedback (standard practice for algorithmic reverbs). One-pole. */
     float hp_state_L, hp_state_R;
+
+    /* Stretch (lo-fi) — when on, comb network runs at half sample rate. */
+    int   stretch;
+    float stretch_last_L, stretch_last_R;
 };
 
 /* a = exp(-2π × 80 / 44100) ≈ 0.9887. One-pole HPF: y = x - lowpass(x). */
@@ -185,6 +189,11 @@ void reverb_set_mod_shape(reverb_t *r, int shape) {
     r->mod_shape = shape;
 }
 
+void reverb_set_stretch(reverb_t *r, int on) {
+    if (!r) return;
+    r->stretch = on ? 1 : 0;
+}
+
 static inline float ap_tick(float *buf, int len, int *pos, float g, float x) {
     int p = *pos;
     float s = buf[p];
@@ -233,7 +242,19 @@ void reverb_process(reverb_t *r,
     float hp_L = r->hp_state_L;
     float hp_R = r->hp_state_R;
 
+    const int stretch = r->stretch;
+    float stretch_last_L = r->stretch_last_L;
+    float stretch_last_R = r->stretch_last_R;
+
     for (int n = 0; n < frames; n++) {
+        if (stretch && (n & 1)) {
+            /* Zero-order-hold previous output; everything below stays frozen
+             * (combs, LFO, HPF state). Effective half-rate = doubled delays
+             * + bitcrush aliasing artifacts. */
+            out_l[n] = stretch_last_L;
+            out_r[n] = stretch_last_R;
+            continue;
+        }
         fb_curr  = c * fb_curr  + ic * fb_t;
         mod_curr = c * mod_curr + ic * mod_t;
 
@@ -287,10 +308,14 @@ void reverb_process(reverb_t *r,
 
         out_l[n] = oL * out_g;
         out_r[n] = oR * out_g;
+        stretch_last_L = out_l[n];
+        stretch_last_R = out_r[n];
     }
 
     r->fb_current = fb_curr;
     r->mod_depth_current = mod_curr;
     r->hp_state_L = hp_L;
     r->hp_state_R = hp_R;
+    r->stretch_last_L = stretch_last_L;
+    r->stretch_last_R = stretch_last_R;
 }

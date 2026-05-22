@@ -8,6 +8,7 @@
 #include "looper.h"
 #include "granular.h"
 #include "microloop.h"
+#include "pshift.h"
 #include "reverb.h"
 
 #define AMB_SAMPLE_RATE       44100
@@ -22,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 static const host_api_v1_t *g_host = NULL;
 
@@ -73,6 +75,18 @@ typedef struct {
     /* Setting (not part of mode presets) — loop length in bars (0.5..8.0). */
     float loop_length_bars;
 
+    /* Settings toggles — Slö character voices. */
+    int   rise_on;       /* auto-swell envelope on wet bus */
+    int   dark_on;       /* sub-octave shimmer into reverb input */
+    int   stretch_on;    /* reverb runs at half rate (lo-fi tail) */
+
+    /* Live BPM tracking — re-applies loop_length and mod_rate when tempo
+     * changes. Throttled to avoid recompute on every block. */
+    float last_bpm;
+
+    /* Rise envelope follower state (one per channel). */
+    float rise_env_L, rise_env_R;
+
     /* Smoothed final-mix value. plugin.c blends dry vs wet bus per sample
      * using mix_current ramping toward inst->mix so knob changes don't click. */
     float mix_current;
@@ -85,6 +99,8 @@ typedef struct {
     microloop_t *microloop;
     /* Stage 4 — reverb. */
     reverb_t *reverb;
+    /* Dark voice — sub-octave pitch shifter feeding reverb input. */
+    pshift_t *pshift;
 } amb_instance_t;
 
 /* Forward declarations. */
@@ -98,9 +114,11 @@ static const float AMB_SYNC_BEATS[6] = {
 #define AMB_SYNC_BEATS_COUNT 6
 
 /* Compute mod rate: if mod_sync, use beat-division from knob × BPM; else
- * free-running log-mapped Hz from knob. Pushes the result into reverb. */
+ * free-running log-mapped Hz from knob. Pushes the result into BOTH reverb
+ * and granular so their LFOs share a tempo. */
 static void amb_apply_mod_rate(amb_instance_t *inst) {
     if (!inst || !inst->reverb) return;
+    float hz;
     if (inst->mod_sync) {
         float bpm = AMB_DEFAULT_BPM;
         if (g_host && g_host->get_bpm) {
@@ -111,11 +129,13 @@ static void amb_apply_mod_rate(amb_instance_t *inst) {
         if (idx < 0) idx = 0;
         if (idx >= AMB_SYNC_BEATS_COUNT) idx = AMB_SYNC_BEATS_COUNT - 1;
         float beats_per_cycle = AMB_SYNC_BEATS[idx];
-        float hz = bpm / (60.0f * beats_per_cycle);
+        hz = bpm / (60.0f * beats_per_cycle);
         reverb_set_mod_rate_hz(inst->reverb, hz);
     } else {
+        hz = 0.05f * expf(inst->mod_rate * 5.075f);
         reverb_set_mod_rate(inst->reverb, inst->mod_rate);
     }
+    if (inst->granular) granular_set_mod_rate_hz(inst->granular, hz);
 }
 
 /* Apply loop_length_bars × current BPM to looper's active loop length. */
@@ -177,6 +197,12 @@ static void* amb_create(const char *module_dir, const char *config_json) {
     inst->mod_rate = 0.60f;
     inst->mode = 0;
     inst->mix_current = inst->mix;
+    inst->rise_on = 0;
+    inst->dark_on = 0;
+    inst->stretch_on = 0;
+    inst->last_bpm = 0.0f;
+    inst->rise_env_L = 0.0f;
+    inst->rise_env_R = 0.0f;
 
     /* Allocate looper buffer for the WORST-case loop length so we can
      * resize the active loop_len later without realloc. 8 bars @ 60 BPM. */
@@ -208,6 +234,15 @@ static void* amb_create(const char *module_dir, const char *config_json) {
         microloop_destroy(inst->microloop);
         free(inst); return NULL;
     }
+
+    inst->pshift = pshift_create();
+    if (!inst->pshift) {
+        looper_destroy(inst->looper);
+        granular_destroy(inst->granular);
+        microloop_destroy(inst->microloop);
+        reverb_destroy(inst->reverb);
+        free(inst); return NULL;
+    }
     reverb_set_decay(inst->reverb, inst->decay);
     reverb_set_mod_depth(inst->reverb, inst->mod_depth);
     reverb_set_mod_rate(inst->reverb, inst->mod_rate);
@@ -221,6 +256,7 @@ static void amb_destroy(void *vp) {
     granular_destroy(inst->granular);
     microloop_destroy(inst->microloop);
     reverb_destroy(inst->reverb);
+    pshift_destroy(inst->pshift);
     free(inst);
 }
 
@@ -247,7 +283,8 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
     static float loop_l[256],  loop_r[256];   /* looper output: loop only */
     static float gran_l[256],  gran_r[256];   /* granular(loop) */
     static float micro_l[256], micro_r[256];  /* microloop(layered) */
-    static float rev_in_l[256], rev_in_r[256]; /* reverb input = dry + micro */
+    static float dark_l[256],  dark_r[256];   /* pshift(dry) — sub-oct */
+    static float rev_in_l[256], rev_in_r[256]; /* reverb input = dry + micro + dark */
     static float wet_l[256],   wet_r[256];    /* reverb tail */
     if (frames > 256) frames = 256;
 
@@ -255,6 +292,19 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
     for (int i = 0; i < frames; i++) {
         dry_l[i] = audio_inout[2*i + 0] * (1.0f / 32768.0f);
         dry_r[i] = audio_inout[2*i + 1] * (1.0f / 32768.0f);
+    }
+
+    /* Live BPM tracking — refresh tempo-dependent values on change. */
+    if (g_host && g_host->get_bpm) {
+        float bpm_now = g_host->get_bpm();
+        if (bpm_now > 0.0f &&
+            (inst->last_bpm <= 0.0f ||
+             (bpm_now > inst->last_bpm + 0.5f) ||
+             (bpm_now < inst->last_bpm - 0.5f))) {
+            inst->last_bpm = bpm_now;
+            amb_apply_loop_length(inst);
+            if (inst->mod_sync) amb_apply_mod_rate(inst);
+        }
     }
 
     /* Stage 1: Looper. Captures dry, outputs only the loop signal. */
@@ -284,26 +334,52 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
      * just the loop content (no dry passthrough); caller adds dry separately. */
     microloop_process(inst->microloop, dry_l, dry_r, micro_l, micro_r, frames);
 
-    /* Reverb input = dry + layered (loop/shimmer) + micro (freeze). */
+    /* Dark (Slö voice) — sub-octave shimmer fed into reverb input. */
+    if (inst->dark_on) {
+        pshift_process(inst->pshift, dry_l, dry_r, dark_l, dark_r, frames);
+    } else {
+        for (int i = 0; i < frames; i++) { dark_l[i] = 0.0f; dark_r[i] = 0.0f; }
+    }
+
+    /* Reverb input = dry + layered (loop/shimmer) + micro (freeze) + dark (sub-oct). */
     for (int i = 0; i < frames; i++) {
-        rev_in_l[i] = dry_l[i] + layered_l[i] + micro_l[i];
-        rev_in_r[i] = dry_r[i] + layered_r[i] + micro_r[i];
+        rev_in_l[i] = dry_l[i] + layered_l[i] + micro_l[i] + dark_l[i];
+        rev_in_r[i] = dry_r[i] + layered_r[i] + micro_r[i] + dark_r[i];
     }
 
     /* Stage 4: Reverb. */
     reverb_process(inst->reverb, rev_in_l, rev_in_r, wet_l, wet_r, frames);
 
     /* Final mix: wet bus = layered + micro + reverb tail.
-     * Smooth the Mix knob per-sample so abrupt knob changes don't click. */
+     * Smooth the Mix knob per-sample so abrupt knob changes don't click.
+     * Rise (auto-swell): envelope follower on dry input ramps wet gain up
+     * over ~500ms on note attack, decays over ~1.5s after silence —
+     * Walrus Slö "Rise" voice character. */
     const float mix_target = inst->mix;
     float mix_curr = inst->mix_current;
     const float c = 0.9989f;  /* ~20 ms time constant */
     const float ic = 1.0f - c;
+    const int   rise_on = inst->rise_on;
+    const float RISE_ATTACK  = 0.0000454f;   /* ~500 ms */
+    const float RISE_RELEASE = 0.0000151f;   /* ~1.5 s */
+    float rise_env = inst->rise_env_L;
     for (int i = 0; i < frames; i++) {
         mix_curr = c * mix_curr + ic * mix_target;
         float dry_g = 1.0f - mix_curr;
-        float wet_bus_l = layered_l[i] + micro_l[i] + wet_l[i];
-        float wet_bus_r = layered_r[i] + micro_r[i] + wet_r[i];
+
+        float rise_g = 1.0f;
+        if (rise_on) {
+            float al = dry_l[i] < 0.0f ? -dry_l[i] : dry_l[i];
+            float ar = dry_r[i] < 0.0f ? -dry_r[i] : dry_r[i];
+            float in_max = al > ar ? al : ar;
+            if (in_max > rise_env) rise_env += (in_max - rise_env) * RISE_ATTACK;
+            else                   rise_env += (in_max - rise_env) * RISE_RELEASE;
+            rise_g = rise_env * 4.0f;
+            if (rise_g > 1.0f) rise_g = 1.0f;
+        }
+
+        float wet_bus_l = (layered_l[i] + micro_l[i] + wet_l[i]) * rise_g;
+        float wet_bus_r = (layered_r[i] + micro_r[i] + wet_r[i]) * rise_g;
         float l = dry_g * dry_l[i] + mix_curr * wet_bus_l;
         float r = dry_g * dry_r[i] + mix_curr * wet_bus_r;
         if (l >  1.0f) l =  1.0f; else if (l < -1.0f) l = -1.0f;
@@ -312,6 +388,7 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
         audio_inout[2*i + 1] = (int16_t)(r * 32767.0f);
     }
     inst->mix_current = mix_curr;
+    inst->rise_env_L = rise_env;
 }
 
 /* --- set_param --- */
@@ -324,7 +401,7 @@ static void amb_set_state(amb_instance_t *inst, const char *val) {
     if (json_get_float(val, "scatter",     &f) == 0) { inst->scatter = f; granular_set_scatter(inst->granular, f); }
     if (json_get_float(val, "micro_hold",  &f) == 0) { inst->micro_hold = f; microloop_set_hold(inst->microloop, f); }
     if (json_get_float(val, "decay",       &f) == 0) { inst->decay = f; reverb_set_decay(inst->reverb, f); }
-    if (json_get_float(val, "mod_depth",   &f) == 0) { inst->mod_depth = f; reverb_set_mod_depth(inst->reverb, f); }
+    if (json_get_float(val, "mod_depth",   &f) == 0) { inst->mod_depth = f; reverb_set_mod_depth(inst->reverb, f); granular_set_mod_depth(inst->granular, f); }
     if (json_get_float(val, "mod_rate",    &f) == 0) { inst->mod_rate = f; reverb_set_mod_rate(inst->reverb, f); }
     if (json_get_int  (val, "mod_sync",       &i) == 0) {
         inst->mod_sync = i ? 1 : 0;
@@ -333,6 +410,12 @@ static void amb_set_state(amb_instance_t *inst, const char *val) {
     if (json_get_int  (val, "mod_shape",      &i) == 0) {
         inst->mod_shape = (i < 0 ? 0 : (i > 2 ? 2 : i));
         reverb_set_mod_shape(inst->reverb, inst->mod_shape);
+    }
+    if (json_get_int  (val, "rise",           &i) == 0) inst->rise_on    = i ? 1 : 0;
+    if (json_get_int  (val, "dark",           &i) == 0) inst->dark_on    = i ? 1 : 0;
+    if (json_get_int  (val, "stretch",        &i) == 0) {
+        inst->stretch_on = i ? 1 : 0;
+        reverb_set_stretch(inst->reverb, inst->stretch_on);
     }
     if (json_get_int  (val, "mode",           &i) == 0)
         inst->mode = (i < 0 ? 0 : (i >= AMB_MODE_COUNT ? AMB_MODE_COUNT - 1 : i));
@@ -392,6 +475,7 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
     if (strcmp(key, "mod_depth") == 0)     {
         inst->mod_depth = (float)atof(val);
         reverb_set_mod_depth(inst->reverb, inst->mod_depth);
+        granular_set_mod_depth(inst->granular, inst->mod_depth);
         return;
     }
     if (strcmp(key, "mod_rate") == 0)      {
@@ -402,6 +486,19 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
     if (strcmp(key, "mod_sync") == 0)       {
         inst->mod_sync = atoi(val) ? 1 : 0;
         amb_apply_mod_rate(inst);
+        return;
+    }
+    if (strcmp(key, "rise") == 0) {
+        inst->rise_on = atoi(val) ? 1 : 0;
+        return;
+    }
+    if (strcmp(key, "dark") == 0) {
+        inst->dark_on = atoi(val) ? 1 : 0;
+        return;
+    }
+    if (strcmp(key, "stretch") == 0) {
+        inst->stretch_on = atoi(val) ? 1 : 0;
+        reverb_set_stretch(inst->reverb, inst->stretch_on);
         return;
     }
     if (strcmp(key, "mod_shape") == 0) {
@@ -432,6 +529,7 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
         microloop_set_hold(inst->microloop, inst->micro_hold);
         reverb_set_decay(inst->reverb, inst->decay);
         reverb_set_mod_depth(inst->reverb, inst->mod_depth);
+        granular_set_mod_depth(inst->granular, inst->mod_depth);
         amb_apply_mod_rate(inst);
         return;
     }
@@ -454,6 +552,9 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
     else if (strcmp(key, "mod_rate") == 0)    n = snprintf(buf, buf_len, "%.3f", inst->mod_rate);
     else if (strcmp(key, "mod_sync") == 0)       n = snprintf(buf, buf_len, "%d", inst->mod_sync);
     else if (strcmp(key, "mod_shape") == 0)      n = snprintf(buf, buf_len, "%d", inst->mod_shape);
+    else if (strcmp(key, "rise") == 0)           n = snprintf(buf, buf_len, "%d", inst->rise_on);
+    else if (strcmp(key, "dark") == 0)           n = snprintf(buf, buf_len, "%d", inst->dark_on);
+    else if (strcmp(key, "stretch") == 0)        n = snprintf(buf, buf_len, "%d", inst->stretch_on);
     else if (strcmp(key, "mode") == 0)        n = snprintf(buf, buf_len, "%d", inst->mode);
     else if (strcmp(key, "mode_count") == 0)  n = snprintf(buf, buf_len, "%d", AMB_MODE_COUNT);
     else if (strcmp(key, "mode_name") == 0)
@@ -466,11 +567,13 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
             "\"mix\":%.4f,\"loop_layer\":%.4f,\"grain_size\":%.4f,\"scatter\":%.4f,"
             "\"micro_hold\":%.4f,\"decay\":%.4f,\"mod_depth\":%.4f,\"mod_rate\":%.4f,"
             "\"mod_sync\":%d,\"mod_shape\":%d,"
+            "\"rise\":%d,\"dark\":%d,\"stretch\":%d,"
             "\"loop_length\":%.2f}",
             inst->mode,
             inst->mix, inst->loop_layer, inst->grain_size, inst->scatter,
             inst->micro_hold, inst->decay, inst->mod_depth, inst->mod_rate,
             inst->mod_sync, inst->mod_shape,
+            inst->rise_on, inst->dark_on, inst->stretch_on,
             inst->loop_length_bars);
     }
     else if (strcmp(key, "chain_params") == 0) {
@@ -487,6 +590,9 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
             "{\"key\":\"mod_rate\",\"name\":\"Mod Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"mod_sync\",\"name\":\"Tempo Sync\",\"type\":\"int\",\"min\":0,\"max\":1},"
             "{\"key\":\"mod_shape\",\"name\":\"Mod Shape\",\"type\":\"enum\",\"options\":[\"Sine\",\"Warp\",\"Sink\"]},"
+            "{\"key\":\"rise\",\"name\":\"Rise (auto-swell)\",\"type\":\"int\",\"min\":0,\"max\":1},"
+            "{\"key\":\"dark\",\"name\":\"Dark (sub-octave)\",\"type\":\"int\",\"min\":0,\"max\":1},"
+            "{\"key\":\"stretch\",\"name\":\"Stretch (lo-fi)\",\"type\":\"int\",\"min\":0,\"max\":1},"
             "{\"key\":\"loop_length\",\"name\":\"Loop Length\",\"type\":\"float\",\"min\":0.5,\"max\":8,\"step\":0.5,\"unit\":\"bars\"}"
             "]");
     }
@@ -520,7 +626,10 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
                   "\"params\":["
                     "{\"key\":\"loop_length\",\"label\":\"Loop Length\"},"
                     "{\"key\":\"mod_shape\",\"label\":\"Mod Shape\"},"
-                    "{\"key\":\"mod_sync\",\"label\":\"Tempo Sync\"}"
+                    "{\"key\":\"mod_sync\",\"label\":\"Tempo Sync\"},"
+                    "{\"key\":\"rise\",\"label\":\"Rise\"},"
+                    "{\"key\":\"dark\",\"label\":\"Dark\"},"
+                    "{\"key\":\"stretch\",\"label\":\"Stretch\"}"
                   "]"
                 "}"
               "}"

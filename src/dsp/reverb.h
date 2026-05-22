@@ -32,6 +32,11 @@ void      reverb_set_mod_rate_hz(reverb_t *r, float hz);
 /* Shape: 0=sine, 1=warp (DC-biased up), 2=sink (DC-biased down). */
 void      reverb_set_mod_shape(reverb_t *r, int shape);
 
+/* Stretch: when on, comb network runs at half sample rate (every other
+ * sample is zero-order-held). Doubles effective delays + adds high-freq
+ * aliasing — Slöer "Stretch" lo-fi character. */
+void      reverb_set_stretch(reverb_t *r, int on);
+
 /* Process stereo float buffers. in and out may NOT alias (in is read first
  * for the whole block via mono-sum; safest to use separate buffers). */
 void      reverb_process(reverb_t *r,
