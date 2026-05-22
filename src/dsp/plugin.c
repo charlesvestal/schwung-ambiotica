@@ -5,6 +5,7 @@
  * DSP stages (looper, granular, microloop, reverb) land in subsequent phases.
  */
 #include "audio_fx_api_v2.h"
+#include "reverb.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -36,6 +37,9 @@ typedef struct {
     int   mod_shape;     /* 0=sine, 1=warp, 2=sink */
 
     int   mode;
+
+    /* Stage 4 — reverb. Stages 1–3 land in later phases. */
+    reverb_t *reverb;
 } amb_instance_t;
 
 /* --- Minimal JSON readers (same pattern as schwung-midiverb plugin.c) --- */
@@ -80,18 +84,50 @@ static void* amb_create(const char *module_dir, const char *config_json) {
     inst->mod_depth = 0.15f;
     inst->mod_rate = 0.20f;
     inst->mode = 0;
+
+    inst->reverb = reverb_create();
+    if (!inst->reverb) { free(inst); return NULL; }
+    reverb_set_decay(inst->reverb, inst->decay);
     return inst;
 }
 
 static void amb_destroy(void *vp) {
-    free(vp);
+    amb_instance_t *inst = (amb_instance_t*)vp;
+    if (!inst) return;
+    reverb_destroy(inst->reverb);
+    free(inst);
 }
 
-/* --- Audio: pure passthrough for phase 1 --- */
+/* --- Audio: reverb (stage 4) wet/dry, stages 1–3 passthrough --- */
 
 static void amb_process(void *vp, int16_t *audio_inout, int frames) {
-    (void)vp; (void)audio_inout; (void)frames;
-    /* Phase 1: leave audio_inout untouched. */
+    amb_instance_t *inst = (amb_instance_t*)vp;
+    if (!inst || !inst->reverb || frames <= 0) return;
+
+    /* Block-local float buffers. process_block is invoked sequentially from
+     * the SPI callback thread, so static reuse is safe even with multiple
+     * Ambiotica instances. */
+    static float in_l[256], in_r[256];
+    static float wet_l[256], wet_r[256];
+    if (frames > 256) frames = 256;
+
+    for (int i = 0; i < frames; i++) {
+        in_l[i] = audio_inout[2*i + 0] * (1.0f / 32768.0f);
+        in_r[i] = audio_inout[2*i + 1] * (1.0f / 32768.0f);
+    }
+
+    reverb_process(inst->reverb, in_l, in_r, wet_l, wet_r, frames);
+
+    const float mix = inst->mix;
+    const float dry_g = 1.0f - mix;
+    for (int i = 0; i < frames; i++) {
+        float l = dry_g * in_l[i] + mix * wet_l[i];
+        float r = dry_g * in_r[i] + mix * wet_r[i];
+        if (l >  1.0f) l =  1.0f; else if (l < -1.0f) l = -1.0f;
+        if (r >  1.0f) r =  1.0f; else if (r < -1.0f) r = -1.0f;
+        audio_inout[2*i + 0] = (int16_t)(l * 32767.0f);
+        audio_inout[2*i + 1] = (int16_t)(r * 32767.0f);
+    }
 }
 
 /* --- set_param --- */
@@ -103,7 +139,7 @@ static void amb_set_state(amb_instance_t *inst, const char *val) {
     if (json_get_float(val, "grain_size",  &f) == 0) inst->grain_size = f;
     if (json_get_float(val, "scatter",     &f) == 0) inst->scatter = f;
     if (json_get_float(val, "micro_hold",  &f) == 0) inst->micro_hold = f;
-    if (json_get_float(val, "decay",       &f) == 0) inst->decay = f;
+    if (json_get_float(val, "decay",       &f) == 0) { inst->decay = f; reverb_set_decay(inst->reverb, f); }
     if (json_get_float(val, "mod_depth",   &f) == 0) inst->mod_depth = f;
     if (json_get_float(val, "mod_rate",    &f) == 0) inst->mod_rate = f;
     if (json_get_int  (val, "mix_kill_dry",   &i) == 0) inst->mix_kill_dry   = i ? 1 : 0;
@@ -126,7 +162,11 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
     if (strcmp(key, "grain_size") == 0)    { inst->grain_size = (float)atof(val); return; }
     if (strcmp(key, "scatter") == 0)       { inst->scatter = (float)atof(val); return; }
     if (strcmp(key, "micro_hold") == 0)    { inst->micro_hold = (float)atof(val); return; }
-    if (strcmp(key, "decay") == 0)         { inst->decay = (float)atof(val); return; }
+    if (strcmp(key, "decay") == 0)         {
+        inst->decay = (float)atof(val);
+        reverb_set_decay(inst->reverb, inst->decay);
+        return;
+    }
     if (strcmp(key, "mod_depth") == 0)     { inst->mod_depth = (float)atof(val); return; }
     if (strcmp(key, "mod_rate") == 0)      { inst->mod_rate = (float)atof(val); return; }
     if (strcmp(key, "mix_kill_dry") == 0)   { inst->mix_kill_dry   = atoi(val) ? 1 : 0; return; }
