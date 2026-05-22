@@ -44,6 +44,10 @@ typedef struct {
 
     int   mode;
 
+    /* Smoothed final-mix value. plugin.c blends dry vs wet bus per sample
+     * using mix_current ramping toward inst->mix so knob changes don't click. */
+    float mix_current;
+
     /* Stage 1 — looper. */
     looper_t *looper;
     /* Stage 2 — granular. */
