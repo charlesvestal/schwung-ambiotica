@@ -206,7 +206,11 @@ static void* amb_create(const char *module_dir, const char *config_json) {
     inst->mode = 0;
     inst->mix_current = inst->mix;
     inst->lofi_tails_on = 0;
-    inst->last_bpm = 0.0f;
+    inst->sample_counter = 0;
+    inst->anchor_sample = 0;
+    inst->tick_count = 0;
+    inst->ticks_per_loop = 0;
+    inst->clock_anchored = 0;
 
     /* Allocate looper buffer for the WORST-case loop length so we can
      * resize the active loop_len later without realloc. 8 bars @ 60 BPM. */
