@@ -136,11 +136,13 @@ void reverb_set_mod_depth(reverb_t *r, float depth_0_1) {
     if (!r) return;
     if (depth_0_1 < 0.0f) depth_0_1 = 0.0f;
     if (depth_0_1 > 1.0f) depth_0_1 = 1.0f;
-    /* Knob -> 0..120 samples (~±2.7 ms) with depth^1.5 curve. Low knob stays
-     * subtle (chorus-y), upper half opens up into Slö-style warble. Within
-     * R_MOD_HEADROOM/2 = 128 sample budget. */
-    float curve = depth_0_1 * sqrtf(depth_0_1);  /* depth^1.5 */
-    r->mod_depth_samples = curve * 120.0f;
+    /* Knob -> 0..45 samples (~±1 ms) with depth^0.7 curve.
+     * Past ~50 samples per comb each delay becomes audibly retuned (the
+     * "broken piano" failure mode). 45 samples × 44.1 kHz = ~1 ms ≈ a few
+     * cents of detune per comb — perceived as movement, not pitch.
+     * Concave curve puts more useful travel in the low/mid knob range. */
+    float curve = powf(depth_0_1, 0.7f);
+    r->mod_depth_samples = curve * 45.0f;
 }
 
 void reverb_set_mod_rate(reverb_t *r, float rate_0_1) {
