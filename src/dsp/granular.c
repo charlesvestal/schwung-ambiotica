@@ -17,6 +17,18 @@
 #define G_GRAIN_MIN_SAMPLES 441                   /* 10 ms */
 #define G_GRAIN_MAX_SAMPLES 22050                 /* 500 ms */
 
+/* Pitch quantization set — universally consonant intervals.
+ * Octaves and perfect fifths are tonally neutral (work in major, minor,
+ * modal, drone). Avoiding thirds/sixths keeps Ambiotica from accidentally
+ * imposing a key on the source material. */
+static const float G_PITCH_STEPS[5] = {
+    1.0f,                  /* unison */
+    2.0f,                  /* +1 octave */
+    0.5f,                  /* −1 octave */
+    1.4983070768766815f,   /* +P5  (2^(+7/12)) */
+    0.6674199270738774f    /* −P5  (2^(−7/12)) */
+};
+
 typedef struct {
     int   active;
     float read_pos;       /* fractional position in buffer (L & R share) */
@@ -75,17 +87,24 @@ static void spawn_grain(granular_t *g) {
     gr->length = len;
     gr->age = 0;
 
-    /* Pitch — quantized to {−1 oct, unity, +1 oct}. Scatter sets the
-     * probability of jumping an octave; otherwise unity. Octaves stay
-     * musical in any key (unlike random semitones, which sound R2-D2-ish).
-     *   scatter = 0   → 100% unity
-     *   scatter = 0.5 → 67% unity, 17% +oct, 17% −oct
-     *   scatter = 1.0 → 33% each */
+    /* Pitch — quantize to unison / ±octave / ±fifth (G_PITCH_STEPS).
+     * Scatter controls probability of leaving unison; when it does, the
+     * non-unison interval is picked uniformly from the four others.
+     *   scatter=0   → 100% unison
+     *   scatter=0.5 → 60% unison, 10% each non-unison
+     *   scatter=1   → 20% each (all 5 intervals equally likely) */
     float pick = lcg_unipolar(&g->rng);
-    float third = g->scatter_0_1 * (1.0f / 3.0f);
-    if (pick < third)               gr->read_step = 2.0f;   /* +1 oct */
-    else if (pick < 2.0f * third)   gr->read_step = 0.5f;   /* −1 oct */
-    else                             gr->read_step = 1.0f;   /* unity */
+    float p_unity = 1.0f - g->scatter_0_1 * 0.8f;
+    int   idx;
+    if (pick < p_unity) {
+        idx = 0;  /* unison */
+    } else {
+        float pick2 = lcg_unipolar(&g->rng);
+        int j = (int)(pick2 * 4.0f);
+        if (j >= 4) j = 3;
+        idx = j + 1;  /* 1..4 → ±oct, ±P5 */
+    }
+    gr->read_step = G_PITCH_STEPS[idx];
 
     /* Start position — read from `len` samples behind write_pos so the
      * grain stays in valid past audio for its full duration (even at +1 oct
