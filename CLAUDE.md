@@ -17,15 +17,18 @@ Schwung audio FX module: rolling looper → granular → micro-looper → modula
 Allocations only in `create_instance`. See parent `schwung/CLAUDE.md` §
 "Realtime Safety".
 
-## Phases
+## Status
 
-1. Scaffold (passthrough) ← current
-2. Reverb stage alone
-3. LFO + mod routing
-4. Looper stage
-5. Granular stage
-6. Micro-Looper stage
-7. Mode presets (atomic 8-knob overwrite)
-8. Doubletap detection + alt-states + SR announcements
-9. help.json + a11y polish
-10. Catalog + release
+v0.1.0 shipped. See `docs/plans/2026-05-22-ambiotica-design.md` for the
+implementation summary and known limitations.
+
+## Stages (all shipped)
+
+- Looper (tempo-aware, ring buffer, ~14 MB worst case)
+- Granular (8-grain scheduler, octave+fifth pitch quantization, LFO-modulated)
+- Micro-loop (parallel freeze layer, auto-freeze at ≥95% hold)
+- Reverb (8 combs + 4 allpasses, per-comb async LFO, HPF input, lo-fi half-rate option)
+
+## Mode presets (root list)
+
+Mismember (glitch) → Loona (loops) → NAPS (frozen pad) → Flow (pure reverb)

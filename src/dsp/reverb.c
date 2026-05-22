@@ -1,9 +1,9 @@
-/* Ambiotica reverb — Freeverb-scaled topology with modulated comb reads.
+/* Ambiotica reverb — 8 parallel damped combs + 4 serial allpasses, with
+ * per-comb modulated read positions for a "breathing" lush ambient tail.
  *
- * Phase 3 addition: each comb's read position is modulated by a slow sine
- * LFO with per-comb phase offset, giving the tail a "breathing" pitch
- * wobble. This is what gives the static plate the lush, evolving character
- * of Slö-style ambient reverb. mod_depth = 0 collapses to the static plate.
+ * Each comb's read is offset by a slow sine LFO running at its own rate
+ * (asynchronous across the 8 voices), giving the tail an evolving pitch
+ * wobble that never repeats. mod_depth = 0 collapses to a static plate.
  */
 #include "reverb.h"
 #include "lfo.h"
@@ -23,8 +23,8 @@
 #define R_MOD_HEADROOM   256   /* extra samples per comb buffer for mod range */
 #define R_SAMPLE_RATE    44100
 
-/* Comb lengths (samples @ 44.1 kHz) span ~50–74 ms — scaled up from
- * Freeverb's small-room values for ambient-pad modal density. */
+/* Comb lengths (samples @ 44.1 kHz) span ~50–74 ms — chosen for
+ * ambient-pad modal density (longer than typical small-room values). */
 static const int R_COMB_BASE[R_COMB] = {
     2237, 2381, 2557, 2719, 2861, 2999, 3137, 3271
 };

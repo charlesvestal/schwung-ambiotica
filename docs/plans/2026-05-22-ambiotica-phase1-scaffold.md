@@ -57,8 +57,7 @@ Ambient effect chain for Schwung / Move: rolling looper → granular → micro-l
 → modulated reverb. Four mode presets (Loona, Mismember, NAPS, Flow), 8-knob
 performance layout, capacitive double-tap gestures.
 
-Inspired by Chase Bliss Audio Blooper, Bananana Effects Mandala, Chase Bliss
-Audio MOOD, and Walrus Audio Slö.
+Ambient effect chain.
 
 ## Build
 
