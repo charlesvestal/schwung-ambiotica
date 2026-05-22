@@ -1,0 +1,6 @@
+build/
+dist/
+*.so
+.DS_Store
+__pycache__/
+*.pyc
