@@ -16,6 +16,7 @@ Audio MOOD, and Walrus Audio Slö.
 
 ## Status
 
-Phase 1: scaffold (passthrough). DSP stages implemented in subsequent phases.
+Phase 1 (scaffold / passthrough) verified on hardware 2026-05-22. DSP stages
+implemented in subsequent phases.
 
 See `docs/plans/2026-05-22-ambiotica-design.md` for the design.
