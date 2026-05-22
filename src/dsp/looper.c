@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 struct looper_s {
     float *buf_L;
@@ -14,9 +15,18 @@ struct looper_s {
      * step into the buffer and echo forever. */
     float  fb_target;
     float  fb_current;
+
+    /* Loop-length crossfade state (same pattern as microloop). MIDI-clock
+     * follower can re-anchor loop_len every loop pass; crossfade hides
+     * the resulting read-pointer jump. */
+    int    loop_len_pending;
+    int    loop_len_queued;
+    int    has_queued;
+    int    crossfade_remaining;
 };
 
-#define LOOPER_SMOOTH_COEF 0.9989f  /* ~20 ms time constant @ 44.1 kHz */
+#define LOOPER_SMOOTH_COEF   0.9989f  /* ~20 ms time constant @ 44.1 kHz */
+#define LOOPER_CROSSFADE_LEN 512      /* ~11.6 ms equal-power crossfade */
 
 looper_t* looper_create(int buf_capacity_samples) {
     if (buf_capacity_samples <= 0) return NULL;
@@ -34,7 +44,20 @@ void looper_set_loop_len(looper_t *l, int loop_len_samples) {
     if (!l) return;
     if (loop_len_samples < 1) loop_len_samples = 1;
     if (loop_len_samples > l->buf_capacity) loop_len_samples = l->buf_capacity;
-    l->loop_len = loop_len_samples;
+
+    /* If a crossfade is already running, queue the new value — don't
+     * disrupt the in-flight transition. */
+    if (l->crossfade_remaining > 0) {
+        if (loop_len_samples != l->loop_len_pending) {
+            l->loop_len_queued = loop_len_samples;
+            l->has_queued = 1;
+        }
+        return;
+    }
+    if (loop_len_samples != l->loop_len) {
+        l->loop_len_pending = loop_len_samples;
+        l->crossfade_remaining = LOOPER_CROSSFADE_LEN;
+    }
 }
 
 void looper_destroy(looper_t *l) {
@@ -67,7 +90,6 @@ void looper_process(looper_t *l,
     if (!l || frames <= 0) return;
     int pos = l->write_pos;
     const int cap = l->buf_capacity;
-    const int loop_len = l->loop_len;
 
     float fb_curr      = l->fb_current;
     const float fb_t   = l->fb_target;
@@ -77,11 +99,36 @@ void looper_process(looper_t *l,
     for (int n = 0; n < frames; n++) {
         fb_curr = c * fb_curr + ic * fb_t;
 
-        /* Read sample at loop_len behind write_pos (modulo capacity). */
-        int read_pos = pos - loop_len;
-        if (read_pos < 0) read_pos += cap;
-        float loopL = l->buf_L[read_pos];
-        float loopR = l->buf_R[read_pos];
+        /* Read from active loop_len position. */
+        int read_pos_a = pos - l->loop_len;
+        if (read_pos_a < 0) read_pos_a += cap;
+        float loopL = l->buf_L[read_pos_a];
+        float loopR = l->buf_R[read_pos_a];
+
+        /* During crossfade, blend with read at the pending loop_len. */
+        if (l->crossfade_remaining > 0) {
+            int read_pos_b = pos - l->loop_len_pending;
+            if (read_pos_b < 0) read_pos_b += cap;
+            float loopL_b = l->buf_L[read_pos_b];
+            float loopR_b = l->buf_R[read_pos_b];
+
+            float t = (float)(LOOPER_CROSSFADE_LEN - l->crossfade_remaining) *
+                      (1.0f / (float)LOOPER_CROSSFADE_LEN);
+            float gain_a = cosf(t * 1.5707963f);  /* π/2 */
+            float gain_b = sinf(t * 1.5707963f);
+            loopL = gain_a * loopL + gain_b * loopL_b;
+            loopR = gain_a * loopR + gain_b * loopR_b;
+
+            l->crossfade_remaining--;
+            if (l->crossfade_remaining == 0) {
+                l->loop_len = l->loop_len_pending;
+                if (l->has_queued && l->loop_len_queued != l->loop_len) {
+                    l->loop_len_pending = l->loop_len_queued;
+                    l->crossfade_remaining = LOOPER_CROSSFADE_LEN;
+                }
+                l->has_queued = 0;
+            }
+        }
 
         /* Write input + feedback back into the buffer at write_pos.
          * Soft-clip so the loop can't blow up under sustained input + fb. */
