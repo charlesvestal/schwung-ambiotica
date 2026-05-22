@@ -32,10 +32,19 @@ static const int R_AP_BASE[R_AP] = {
     347, 421, 511, 619
 };
 
-/* Per-comb LFO phase offsets — irregularly placed around the circle so the
- * 8 mods never form a static phase relationship (avoids "synced wobble"). */
+/* Initial LFO phase per comb — irregular placement so the 8 mods start
+ * decorrelated rather than aligned. Phases drift apart further at runtime
+ * because each comb runs at its own rate (see R_COMB_RATE_MULT). */
 static const float R_COMB_PHASE[R_COMB] = {
     0.00f, 0.83f, 1.71f, 2.42f, 3.27f, 4.15f, 5.02f, 5.74f
+};
+
+/* Per-comb LFO rate multipliers — each comb runs at base_rate * mult[i].
+ * Spread around 1.0 with irrational-ish ratios so the 8 LFOs never re-sync.
+ * This is the "asynchronous LFO" character: tail evolves continuously
+ * instead of pulsing in unison (= detune sound). */
+static const float R_COMB_RATE_MULT[R_COMB] = {
+    1.000f, 1.093f, 0.872f, 1.207f, 0.954f, 1.131f, 0.827f, 1.049f
 };
 
 struct reverb_s {
@@ -66,8 +75,9 @@ struct reverb_s {
     float input_gain;
     float wet_gain;
 
-    /* Modulation */
-    lfo_t lfo;
+    /* Modulation — one LFO per comb, each at its own rate. */
+    lfo_t lfo[R_COMB];
+    float base_rate_hz;       /* user-set rate before per-comb multiplication */
     float mod_depth_samples;  /* 0..R_MOD_HEADROOM/2 */
 };
 
@@ -97,9 +107,13 @@ reverb_t* reverb_create(void) {
     r->ap_g = 0.70f;
     r->input_gain = 0.40f;
     r->wet_gain = 0.18f;
-    lfo_init(&r->lfo, R_SAMPLE_RATE);
-    lfo_set_rate_hz(&r->lfo, 0.3f);
+    r->base_rate_hz = 0.3f;
     r->mod_depth_samples = 0.0f;
+    for (int i = 0; i < R_COMB; i++) {
+        lfo_init(&r->lfo[i], R_SAMPLE_RATE);
+        lfo_set_phase(&r->lfo[i], R_COMB_PHASE[i]);
+        lfo_set_rate_hz(&r->lfo[i], r->base_rate_hz * R_COMB_RATE_MULT[i]);
+    }
     return r;
 }
 
@@ -134,8 +148,10 @@ void reverb_set_mod_rate(reverb_t *r, float rate_0_1) {
     if (rate_0_1 < 0.0f) rate_0_1 = 0.0f;
     if (rate_0_1 > 1.0f) rate_0_1 = 1.0f;
     /* Log map: 0 -> 0.05 Hz, 0.5 -> ~0.63 Hz, 1 -> 8 Hz. */
-    float hz = 0.05f * expf(rate_0_1 * 5.075f);
-    lfo_set_rate_hz(&r->lfo, hz);
+    r->base_rate_hz = 0.05f * expf(rate_0_1 * 5.075f);
+    for (int i = 0; i < R_COMB; i++) {
+        lfo_set_rate_hz(&r->lfo[i], r->base_rate_hz * R_COMB_RATE_MULT[i]);
+    }
 }
 
 static inline float ap_tick(float *buf, int len, int *pos, float g, float x) {
@@ -173,20 +189,15 @@ void reverb_process(reverb_t *r,
     const float in_g   = r->input_gain;
     const float out_g  = r->wet_gain;
     const float mod_d  = r->mod_depth_samples;
-    const float lfo_inc = r->lfo.increment;
 
     for (int n = 0; n < frames; n++) {
-        /* Advance shared LFO phase once per sample. Each comb reads sin at
-         * its own phase offset for a decorrelated 8-voice modulation. */
-        r->lfo.phase += lfo_inc;
-        if (r->lfo.phase >= TWO_PI) r->lfo.phase -= TWO_PI;
-
         float xL = in_l[n] * in_g;
         float xR = in_r[n] * in_g;
 
         float sumL = 0.0f, sumR = 0.0f;
         for (int i = 0; i < R_COMB; i++) {
-            float mod = lfo_sine_at_offset(&r->lfo, R_COMB_PHASE[i]) * mod_d;
+            /* Each comb advances its own LFO at its own rate. */
+            float mod = lfo_tick_sine(&r->lfo[i]) * mod_d;
 
             /* L comb */
             float dL = (float)R_COMB_BASE[i] + mod;
