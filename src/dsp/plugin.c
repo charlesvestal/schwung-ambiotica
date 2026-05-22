@@ -131,20 +131,33 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
         dry_r[i] = audio_inout[2*i + 1] * (1.0f / 32768.0f);
     }
 
-    /* Stage 1: Looper. */
+    /* Stage 1: Looper. stage_l = dry + loop (feeds chain). */
     looper_process(inst->looper, dry_l, dry_r, stage_l, stage_r, frames);
 
     /* Stages 2–3 still passthrough; stage_l/stage_r feed reverb directly. */
 
-    /* Stage 4: Reverb. */
+    /* Stage 4: Reverb processes (dry + loop). */
     reverb_process(inst->reverb, stage_l, stage_r, wet_l, wet_r, frames);
 
-    /* Final dry/wet against the original input. */
+    /* Final mix.
+     *
+     * wet_bus = loop_direct + reverb_tail
+     * out     = (1-mix)*dry + mix*wet_bus
+     *
+     * The loop signal is extracted (stage - dry) and added straight to the
+     * wet bus alongside the reverb tail — without going through the reverb's
+     * internal input/output attenuation. This keeps the loop audible at full
+     * strength while the reverb tail remains a subtle "added" layer.
+     */
     const float mix = inst->mix;
     const float dry_g = 1.0f - mix;
     for (int i = 0; i < frames; i++) {
-        float l = dry_g * dry_l[i] + mix * wet_l[i];
-        float r = dry_g * dry_r[i] + mix * wet_r[i];
+        float loop_l = stage_l[i] - dry_l[i];
+        float loop_r = stage_r[i] - dry_r[i];
+        float wet_bus_l = loop_l + wet_l[i];
+        float wet_bus_r = loop_r + wet_r[i];
+        float l = dry_g * dry_l[i] + mix * wet_bus_l;
+        float r = dry_g * dry_r[i] + mix * wet_bus_r;
         if (l >  1.0f) l =  1.0f; else if (l < -1.0f) l = -1.0f;
         if (r >  1.0f) r =  1.0f; else if (r < -1.0f) r = -1.0f;
         audio_inout[2*i + 0] = (int16_t)(l * 32767.0f);
