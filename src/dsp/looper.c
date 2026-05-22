@@ -34,9 +34,10 @@ void looper_set_layer(looper_t *l, float layer_0_1) {
     if (!l) return;
     if (layer_0_1 < 0.0f) layer_0_1 = 0.0f;
     if (layer_0_1 > 1.0f) layer_0_1 = 1.0f;
-    /* Cap below unity to prevent uncontrolled growth on sustained input.
-     * 0.95 still gives multi-pass loop layering that decays slowly. */
-    l->feedback_gain = layer_0_1 * 0.95f;
+    /* knob^2 curve so the bottom half is much quieter (perceptually useful
+     * range) and only the top quarter gets into "lush layered loop" territory.
+     * Cap at 0.95 prevents uncontrolled growth on sustained input. */
+    l->feedback_gain = layer_0_1 * layer_0_1 * 0.95f;
 }
 
 void looper_clear(looper_t *l) {
