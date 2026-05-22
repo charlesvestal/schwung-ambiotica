@@ -52,6 +52,11 @@ static inline float lcg_bipolar(uint32_t *s) {
     uint32_t v = lcg_next(s);
     return (float)v * (2.0f / 4294967295.0f) - 1.0f;
 }
+/* Uniform float in [0, 1). */
+static inline float lcg_unipolar(uint32_t *s) {
+    uint32_t v = lcg_next(s);
+    return (float)v * (1.0f / 4294967295.0f);
+}
 
 static int current_grain_length(const granular_t *g) {
     int span = G_GRAIN_MAX_SAMPLES - G_GRAIN_MIN_SAMPLES;
@@ -70,9 +75,17 @@ static void spawn_grain(granular_t *g) {
     gr->length = len;
     gr->age = 0;
 
-    /* Pitch — Scatter scales the ±octave random pitch shift. */
-    float pitch_sem = g->scatter_0_1 * 12.0f * lcg_bipolar(&g->rng);
-    gr->read_step = powf(2.0f, pitch_sem * (1.0f / 12.0f));
+    /* Pitch — quantized to {−1 oct, unity, +1 oct}. Scatter sets the
+     * probability of jumping an octave; otherwise unity. Octaves stay
+     * musical in any key (unlike random semitones, which sound R2-D2-ish).
+     *   scatter = 0   → 100% unity
+     *   scatter = 0.5 → 67% unity, 17% +oct, 17% −oct
+     *   scatter = 1.0 → 33% each */
+    float pick = lcg_unipolar(&g->rng);
+    float third = g->scatter_0_1 * (1.0f / 3.0f);
+    if (pick < third)               gr->read_step = 2.0f;   /* +1 oct */
+    else if (pick < 2.0f * third)   gr->read_step = 0.5f;   /* −1 oct */
+    else                             gr->read_step = 1.0f;   /* unity */
 
     /* Start position — read from `len` samples behind write_pos so the
      * grain stays in valid past audio for its full duration (even at +1 oct

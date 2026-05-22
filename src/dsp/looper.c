@@ -70,9 +70,11 @@ void looper_process(looper_t *l,
         l->buf_L[pos] = newL;
         l->buf_R[pos] = newR;
 
-        /* Output: input + same feedback gain × delayed read. */
-        out_l[n] = in_l[n] + fb * loopL;
-        out_r[n] = in_r[n] + fb * loopR;
+        /* Output: ONLY the loop signal (no dry). Caller mixes dry separately
+         * so subsequent stages can grain/transform the loop without touching
+         * the live signal. */
+        out_l[n] = fb * loopL;
+        out_r[n] = fb * loopR;
 
         pos++; if (pos >= len) pos = 0;
     }

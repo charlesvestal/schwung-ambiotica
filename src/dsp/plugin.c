@@ -125,61 +125,61 @@ static void amb_destroy(void *vp) {
     free(inst);
 }
 
-/* --- Audio chain: looper -> [stage2,3 passthrough] -> reverb -> dry/wet mix --- */
+/* --- Audio chain.
+ *
+ *   dry → looper → loop_signal (loop only, no dry)
+ *                       ↓
+ *                     granular → grained_loop
+ *                                       ↓
+ *   dry + grained_loop → reverb → reverb_tail
+ *
+ *   wet_bus = grained_loop + reverb_tail
+ *   out     = (1-mix)*dry + mix*wet_bus
+ *
+ * Dry passes through clean. Scatter / pitch effects only affect the loop
+ * layer, never the live signal. The reverb sees dry + grained loop so the
+ * tail spans both the live note and any looped textures. */
 
 static void amb_process(void *vp, int16_t *audio_inout, int frames) {
     amb_instance_t *inst = (amb_instance_t*)vp;
-    if (!inst || !inst->reverb || !inst->looper || frames <= 0) return;
+    if (!inst || !inst->reverb || !inst->looper || !inst->granular || frames <= 0) return;
 
-    /* Block-local float buffers. process_block is invoked sequentially from
-     * the SPI callback thread, so static reuse is safe even with multiple
-     * Ambiotica instances. */
-    static float dry_l[256], dry_r[256];
-    static float stage_l[256], stage_r[256];
-    static float wet_l[256], wet_r[256];
+    static float dry_l[256],   dry_r[256];
+    static float loop_l[256],  loop_r[256];   /* looper output: loop only */
+    static float gran_l[256],  gran_r[256];   /* granular(loop) */
+    static float rev_in_l[256], rev_in_r[256]; /* reverb input = dry + gran */
+    static float wet_l[256],   wet_r[256];    /* reverb tail */
     if (frames > 256) frames = 256;
 
-    /* Int16 -> float, preserve dry for final mix. */
+    /* Int16 → float. */
     for (int i = 0; i < frames; i++) {
         dry_l[i] = audio_inout[2*i + 0] * (1.0f / 32768.0f);
         dry_r[i] = audio_inout[2*i + 1] * (1.0f / 32768.0f);
     }
 
-    /* Stage 1: Looper. stage_l = dry + loop (feeds chain). */
-    looper_process(inst->looper, dry_l, dry_r, stage_l, stage_r, frames);
+    /* Stage 1: Looper. Captures dry, outputs only the loop signal. */
+    looper_process(inst->looper, dry_l, dry_r, loop_l, loop_r, frames);
 
-    /* Stage 2: Granular replaces stage_l/stage_r in-place via a temp buffer. */
-    static float gran_l[256], gran_r[256];
-    granular_process(inst->granular, stage_l, stage_r, gran_l, gran_r, frames);
-    /* Copy gran back into stage so stage_l is the post-granular signal. */
+    /* Stage 2: Granular processes the loop signal only (live signal stays clean). */
+    granular_process(inst->granular, loop_l, loop_r, gran_l, gran_r, frames);
+
+    /* Stage 3: still passthrough — phase 6. */
+
+    /* Reverb input = dry + grained loop so the tail spans both. */
     for (int i = 0; i < frames; i++) {
-        stage_l[i] = gran_l[i];
-        stage_r[i] = gran_r[i];
+        rev_in_l[i] = dry_l[i] + gran_l[i];
+        rev_in_r[i] = dry_r[i] + gran_r[i];
     }
 
-    /* Stage 3 still passthrough; stage_l/stage_r feed reverb directly. */
-
     /* Stage 4: Reverb. */
-    reverb_process(inst->reverb, stage_l, stage_r, wet_l, wet_r, frames);
+    reverb_process(inst->reverb, rev_in_l, rev_in_r, wet_l, wet_r, frames);
 
-    /* Final mix.
-     *
-     * wet_bus = post-stage-3 signal (looper+granular+passthrough) + reverb_tail
-     * out     = (1-mix)*dry + mix*wet_bus
-     *
-     * No subtraction. The wet bus is the chain output up through stage 3
-     * (which at zero settings ≈ dry, with effects ≈ processed signal) plus
-     * the reverb tail. Mix blends dry vs that whole wet path. This avoids
-     * leaking the granular's transformation into the dry signal — at zero
-     * settings stage_l ≈ dry_l so Mix=1 sounds approximately like dry +
-     * reverb tail; with effects active it cleanly carries them in the wet
-     * bus only.
-     */
+    /* Final mix: wet bus = grained loop (direct) + reverb tail. */
     const float mix = inst->mix;
     const float dry_g = 1.0f - mix;
     for (int i = 0; i < frames; i++) {
-        float wet_bus_l = stage_l[i] + wet_l[i];
-        float wet_bus_r = stage_r[i] + wet_r[i];
+        float wet_bus_l = gran_l[i] + wet_l[i];
+        float wet_bus_r = gran_r[i] + wet_r[i];
         float l = dry_g * dry_l[i] + mix * wet_bus_l;
         float r = dry_g * dry_r[i] + mix * wet_bus_r;
         if (l >  1.0f) l =  1.0f; else if (l < -1.0f) l = -1.0f;

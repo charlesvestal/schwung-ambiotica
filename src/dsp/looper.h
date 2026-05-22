@@ -24,7 +24,10 @@ void      looper_set_layer(looper_t *l, float layer_0_1);
 /* One-shot: zero the entire buffer. Safe to call from set_param. */
 void      looper_clear(looper_t *l);
 
-/* Process stereo block. in and out may NOT alias the same buffer. */
+/* Process stereo block. Reads from in_l/in_r and writes them into the
+ * capture ring (with feedback). out_l/out_r receive ONLY the loop signal
+ * (fb × delayed_read) — no dry. The caller is responsible for mixing dry
+ * back in. in and out may NOT alias. */
 void      looper_process(looper_t *l,
                          const float *in_l, const float *in_r,
                          float *out_l, float *out_r,
