@@ -24,6 +24,9 @@
 #include <stdio.h>
 #include <math.h>
 
+/* MIDI clock = 24 pulses per quarter note (PPQ). */
+#define AMB_PPQ 24
+
 static const host_api_v1_t *g_host = NULL;
 
 #define AMB_MODE_COUNT 4
@@ -77,9 +80,14 @@ typedef struct {
     /* Lo-fi tails — reverb runs at half rate for time-stretched bitcrush. */
     int   lofi_tails_on;
 
-    /* Live BPM tracking — re-applies loop_length and mod_rate when tempo
-     * changes. Throttled to avoid recompute on every block. */
-    float last_bpm;
+    /* MIDI clock follower (24 PPQ). Anchors loop length to actual sample
+     * count per N clock ticks → drift impossible while clock is running.
+     * On clock loss, looper falls back to its existing length. */
+    uint64_t sample_counter;       /* monotonic sample count */
+    uint64_t anchor_sample;        /* sample at last loop-boundary tick */
+    int      tick_count;           /* ticks accumulated since anchor */
+    int      ticks_per_loop;       /* cached: bars × 4 × 24 */
+    int      clock_anchored;       /* 1 once we have a valid anchor */
 
     /* Smoothed final-mix value. plugin.c blends dry vs wet bus per sample
      * using mix_current ramping toward inst->mix so knob changes don't click. */
@@ -130,7 +138,9 @@ static void amb_apply_mod_rate(amb_instance_t *inst) {
     if (inst->granular) granular_set_mod_rate_hz(inst->granular, hz);
 }
 
-/* Apply loop_length_bars × current BPM to looper's active loop length. */
+/* Apply loop_length_bars × current BPM to looper's active loop length.
+ * Used at instance create + when user changes Loop Length setting.
+ * MIDI clock follower then re-anchors per loop pass for drift-free sync. */
 static void amb_apply_loop_length(amb_instance_t *inst) {
     if (!inst || !inst->looper) return;
     float bars = inst->loop_length_bars;
@@ -144,6 +154,12 @@ static void amb_apply_loop_length(amb_instance_t *inst) {
     float loop_seconds = bars * (float)AMB_BEATS_PER_BAR * 60.0f / bpm;
     int samples = (int)(loop_seconds * (float)AMB_SAMPLE_RATE);
     looper_set_loop_len(inst->looper, samples);
+
+    /* Cache ticks-per-loop for the MIDI clock follower (PPQ × beats/bar × bars). */
+    inst->ticks_per_loop = (int)(bars * (float)AMB_BEATS_PER_BAR * (float)AMB_PPQ + 0.5f);
+    /* Reset anchor so a fresh tick stream re-locks. */
+    inst->clock_anchored = 0;
+    inst->tick_count = 0;
 }
 
 /* --- Minimal JSON readers (same pattern as schwung-midiverb plugin.c) --- */
@@ -270,6 +286,9 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
         dry_l[i] = audio_inout[2*i + 0] * (1.0f / 32768.0f);
         dry_r[i] = audio_inout[2*i + 1] * (1.0f / 32768.0f);
     }
+
+    /* Advance sample counter for MIDI clock follower. */
+    inst->sample_counter += (uint64_t)frames;
 
     /* Stage 1: Looper. Captures dry, outputs only the loop signal. */
     looper_process(inst->looper, dry_l, dry_r, loop_l, loop_r, frames);
@@ -563,10 +582,47 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
     return n;
 }
 
-/* --- MIDI: ignored in phase 1 (doubletap detection is phase 8) --- */
+/* --- MIDI: subscribe to host clock (0xF8) for drift-free loop sync. --- */
 
 static void amb_on_midi(void *vp, const uint8_t *msg, int len, int source) {
-    (void)vp; (void)msg; (void)len; (void)source;
+    amb_instance_t *inst = (amb_instance_t*)vp;
+    if (!inst || !msg || len < 1) return;
+    uint8_t status = msg[0];
+
+    /* MIDI Start (0xFA) or Continue (0xFB) — reset anchor so the next tick
+     * starts a fresh loop period. */
+    if (status == 0xFA || status == 0xFB) {
+        inst->clock_anchored = 0;
+        inst->tick_count = 0;
+        return;
+    }
+
+    /* MIDI Clock pulse (0xF8). 24 PPQ — N ticks per loop where
+     * N = bars × beats/bar × PPQ. */
+    if (status != 0xF8) return;
+    if (inst->ticks_per_loop <= 0) return;
+
+    if (!inst->clock_anchored) {
+        /* First tick we see — anchor to current sample count. */
+        inst->anchor_sample = inst->sample_counter;
+        inst->tick_count = 0;
+        inst->clock_anchored = 1;
+        return;
+    }
+
+    inst->tick_count++;
+    if (inst->tick_count >= inst->ticks_per_loop) {
+        /* One full loop's worth of clock elapsed — that's the
+         * authoritative loop length for this pass. Update looper
+         * (crossfades internally) and re-anchor for the next loop. */
+        uint64_t actual_samples = inst->sample_counter - inst->anchor_sample;
+        if (actual_samples > 0 && actual_samples < (uint64_t)(AMB_LOOP_BUF_MAX_SECONDS * AMB_SAMPLE_RATE)) {
+            looper_set_loop_len(inst->looper, (int)actual_samples);
+        }
+        inst->anchor_sample = inst->sample_counter;
+        inst->tick_count = 0;
+    }
+    (void)source;
 }
 
 /* --- API surface --- */
