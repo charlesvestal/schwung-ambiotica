@@ -33,7 +33,6 @@ ${CROSS_PREFIX}gcc -O3 -shared -fPIC \
     src/dsp/looper.c \
     src/dsp/granular.c \
     src/dsp/microloop.c \
-    src/dsp/pshift.c \
     src/dsp/reverb.c \
     src/dsp/lfo.c \
     -o build/ambiotica.so \
