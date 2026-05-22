@@ -22,7 +22,7 @@ static const host_api_v1_t *g_host = NULL;
 
 #define AMB_MODE_COUNT 4
 static const char *AMB_MODE_NAMES[AMB_MODE_COUNT] = {
-    "Loona", "Mismember", "NAPS", "Flow"
+    "Mismember", "Loona", "NAPS", "Flow"
 };
 
 typedef struct {
@@ -35,13 +35,13 @@ typedef struct {
  * buffers (looper / granular / microloop) are intentionally preserved
  * across mode switches so audio doesn't dump. */
 static const amb_preset_t AMB_PRESETS[AMB_MODE_COUNT] = {
+    /* Mismember — chaotic glitch / pointillistic texture. */
+    { .mix = 0.50f, .loop_layer = 0.87f, .grain_size = 0.25f, .scatter = 0.80f,
+      .micro_hold = 0.27f, .decay = 0.50f, .mod_depth = 0.50f, .mod_rate = 0.60f },
     /* Loona — clean rolling-capture loops, short reverb. Loop_layer high so
      * a single phrase clearly returns at 6 s; decay low so it isn't washed. */
     { .mix = 0.50f, .loop_layer = 0.95f, .grain_size = 0.90f, .scatter = 0.05f,
       .micro_hold = 0.10f, .decay = 0.15f, .mod_depth = 0.15f, .mod_rate = 0.20f },
-    /* Mismember — chaotic glitch / pointillistic texture. */
-    { .mix = 0.50f, .loop_layer = 0.87f, .grain_size = 0.25f, .scatter = 0.80f,
-      .micro_hold = 0.27f, .decay = 0.50f, .mod_depth = 0.50f, .mod_rate = 0.60f },
     /* NAPS — frozen-breath sound under lush tail. */
     { .mix = 0.50f, .loop_layer = 0.20f, .grain_size = 0.80f, .scatter = 0.20f,
       .micro_hold = 0.65f, .decay = 0.80f, .mod_depth = 0.25f, .mod_rate = 0.15f },
@@ -115,15 +115,15 @@ static void* amb_create(const char *module_dir, const char *config_json) {
     (void)module_dir; (void)config_json;
     amb_instance_t *inst = (amb_instance_t*)calloc(1, sizeof(amb_instance_t));
     if (!inst) return NULL;
-    /* Defaults match the Loona preset (mode 0) row of the design doc. */
+    /* Defaults match the Mismember preset (mode 0 — first in the list). */
     inst->mix = 0.50f;
-    inst->loop_layer = 0.70f;
-    inst->grain_size = 0.90f;
-    inst->scatter = 0.05f;
-    inst->micro_hold = 0.10f;
-    inst->decay = 0.30f;
-    inst->mod_depth = 0.15f;
-    inst->mod_rate = 0.20f;
+    inst->loop_layer = 0.87f;
+    inst->grain_size = 0.25f;
+    inst->scatter = 0.80f;
+    inst->micro_hold = 0.27f;
+    inst->decay = 0.50f;
+    inst->mod_depth = 0.50f;
+    inst->mod_rate = 0.60f;
     inst->mode = 0;
     inst->mix_current = inst->mix;
 
@@ -412,7 +412,7 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
     else if (strcmp(key, "chain_params") == 0) {
         n = snprintf(buf, buf_len,
             "["
-            "{\"key\":\"mode\",\"name\":\"Mode\",\"type\":\"enum\",\"options\":[\"Loona\",\"Mismember\",\"NAPS\",\"Flow\"]},"
+            "{\"key\":\"mode\",\"name\":\"Mode\",\"type\":\"enum\",\"options\":[\"Mismember\",\"Loona\",\"NAPS\",\"Flow\"]},"
             "{\"key\":\"mix\",\"name\":\"Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"loop_layer\",\"name\":\"Loop Layer\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"grain_size\",\"name\":\"Grain Size\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
