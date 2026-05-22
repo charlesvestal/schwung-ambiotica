@@ -1,0 +1,68 @@
+{
+  "title": "Ambiotica",
+  "children": [
+    {
+      "title": "Overview",
+      "lines": [
+        "Ambient chain:",
+        "looper to granular",
+        "to micro-loop to",
+        "modulated reverb.",
+        "",
+        "Four mode presets",
+        "(Loona, Mismember,",
+        "NAPS, Flow) reset",
+        "the 8 knobs to a",
+        "character starting",
+        "point."
+      ]
+    },
+    {
+      "title": "Knobs",
+      "children": [
+        {
+          "title": "Knob Mapping",
+          "lines": [
+            "1 Mix",
+            "2 Loop Layer",
+            "3 Grain Size",
+            "4 Scatter",
+            "5 Micro Hold",
+            "6 Decay",
+            "7 Mod Depth",
+            "8 Mod Rate"
+          ]
+        },
+        {
+          "title": "Double-tap",
+          "lines": [
+            "Mix: Kill Dry",
+            "Loop Layer: Clear",
+            "Grain Size: Glitch",
+            "Scatter: Re-seed",
+            "Micro Hold: Hold",
+            "Decay: Self-osc",
+            "Mod Depth: Sync",
+            "Mod Rate: Shape"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Modes",
+      "lines": [
+        "Loona: rolling",
+        " capture loops",
+        "",
+        "Mismember: glitch",
+        " grain textures",
+        "",
+        "NAPS: frozen breath",
+        " under lush tail",
+        "",
+        "Flow: pure modulated",
+        " reverb (no capture)"
+      ]
+    }
+  ]
+}
