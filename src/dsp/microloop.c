@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #define M_SAMPLE_RATE      44100
 #define M_MIN_LEN_SAMPLES  2205     /* 50 ms @ 44.1 kHz */
@@ -44,9 +45,15 @@ void microloop_set_hold(microloop_t *m, float hold_0_1) {
     if (hold_0_1 < 0.0f) hold_0_1 = 0.0f;
     if (hold_0_1 > 1.0f) hold_0_1 = 1.0f;
     m->hold = hold_0_1;
-    /* Linear mapping for now — easy to tune by ear. */
-    m->loop_len = M_MIN_LEN_SAMPLES +
-                  (int)((float)(M_MAX_LEN_SAMPLES - M_MIN_LEN_SAMPLES) * hold_0_1);
+    /* Log scale 50 ms .. 4 s. Mid-knob lands in delay territory (~450 ms)
+     * for immediate audibility; upper half stretches into long loop. */
+    float log_min = logf((float)M_MIN_LEN_SAMPLES);
+    float log_max = logf((float)M_MAX_LEN_SAMPLES);
+    float exponent = log_min + (log_max - log_min) * hold_0_1;
+    int len = (int)expf(exponent);
+    if (len < M_MIN_LEN_SAMPLES) len = M_MIN_LEN_SAMPLES;
+    if (len > M_MAX_LEN_SAMPLES) len = M_MAX_LEN_SAMPLES;
+    m->loop_len = len;
 }
 
 void microloop_set_freeze(microloop_t *m, int freeze) {
@@ -60,7 +67,14 @@ void microloop_process(microloop_t *m,
                       int frames) {
     if (!m || frames <= 0) return;
     const float hold = m->hold;
-    const float fb   = hold * 0.95f;
+    /* Output gain: sqrt curve so mid-knob is already loud (50% knob = 71%).
+     * Was hold-linear, which felt buried at all but the highest settings. */
+    const float out_gain = sqrtf(hold);
+    /* Feedback ramps to near-unity in the first 20% of knob so the loop
+     * actually persists once you've engaged it. After that it stays high. */
+    float fb_curve = hold * 5.0f;
+    if (fb_curve > 1.0f) fb_curve = 1.0f;
+    const float fb = fb_curve * 0.95f;
     /* Auto-engage freeze when knob approaches max, OR if alt-state demands it. */
     const int frozen = m->freeze || (hold >= M_AUTO_FREEZE);
     const int loop_len = m->loop_len;
@@ -73,12 +87,9 @@ void microloop_process(microloop_t *m,
         float read_L = m->buf_L[read_pos];
         float read_R = m->buf_R[read_pos];
 
-        /* Output: ONLY the loop content (hold × delayed read).
-         * Caller mixes in dry passthrough separately so micro-loop can sit
-         * parallel to the looper/granular chain — freeze always has the
-         * live signal to capture regardless of Loop Layer. */
-        out_l[n] = hold * read_L;
-        out_r[n] = hold * read_R;
+        /* Output: ONLY the loop content. Caller mixes in dry passthrough. */
+        out_l[n] = out_gain * read_L;
+        out_r[n] = out_gain * read_R;
 
         /* Write input + feedback into buffer unless frozen. */
         if (!frozen) {
