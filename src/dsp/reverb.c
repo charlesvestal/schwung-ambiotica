@@ -80,7 +80,14 @@ struct reverb_s {
     float base_rate_hz;       /* user-set rate before per-comb multiplication */
     float mod_depth_target,    mod_depth_current;  /* 0..R_MOD_HEADROOM/2 */
     int   mod_shape;           /* 0=sine, 1=warp, 2=sink */
+
+    /* Input highpass — stops sub-80-Hz energy from piling up in the comb
+     * feedback (standard practice for algorithmic reverbs). One-pole. */
+    float hp_state_L, hp_state_R;
 };
+
+/* a = exp(-2π × 80 / 44100) ≈ 0.9887. One-pole HPF: y = x - lowpass(x). */
+#define R_HPF_LP_COEF  0.9887f
 
 #define R_SMOOTH_COEF 0.9989f  /* ~20 ms time constant @ 44.1 kHz */
 
@@ -221,12 +228,22 @@ void reverb_process(reverb_t *r,
     const float c      = R_SMOOTH_COEF;
     const float ic     = 1.0f - c;
 
+    const float hp_a   = R_HPF_LP_COEF;
+    const float hp_1ma = 1.0f - hp_a;
+    float hp_L = r->hp_state_L;
+    float hp_R = r->hp_state_R;
+
     for (int n = 0; n < frames; n++) {
         fb_curr  = c * fb_curr  + ic * fb_t;
         mod_curr = c * mod_curr + ic * mod_t;
 
         float xL = in_l[n] * in_g;
         float xR = in_r[n] * in_g;
+        /* Input HPF — strip sub-~80 Hz before the comb network. */
+        hp_L = hp_a * hp_L + hp_1ma * xL;
+        hp_R = hp_a * hp_R + hp_1ma * xR;
+        xL = xL - hp_L;
+        xR = xR - hp_R;
 
         float sumL = 0.0f, sumR = 0.0f;
         const int shape = r->mod_shape;
@@ -274,4 +291,6 @@ void reverb_process(reverb_t *r,
 
     r->fb_current = fb_curr;
     r->mod_depth_current = mod_curr;
+    r->hp_state_L = hp_L;
+    r->hp_state_R = hp_R;
 }
