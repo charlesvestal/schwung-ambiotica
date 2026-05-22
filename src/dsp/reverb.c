@@ -1,78 +1,105 @@
-/* Ambiotica reverb — Freeverb-scaled topology.
+/* Ambiotica reverb — Freeverb-scaled topology with modulated comb reads.
  *
- * 8 parallel damped combs -> 4 serial allpasses, per channel. True stereo
- * via +37-sample spread on the R channel. Decay knob maps to comb feedback
- * via a perceptual ~T60 curve (knob^0.4) so the low/mid knob range covers
- * "short room" -> "long hall" rather than compressing everything into the top.
- *
- * Phase 2: static plate. Phase 3 will add LFO modulation on the comb delay
- * read positions — that's where Slö's "breathing" character actually lives.
+ * Phase 3 addition: each comb's read position is modulated by a slow sine
+ * LFO with per-comb phase offset, giving the tail a "breathing" pitch
+ * wobble. This is what gives the static plate the lush, evolving character
+ * of Slö-style ambient reverb. mod_depth = 0 collapses to the static plate.
  */
 #include "reverb.h"
+#include "lfo.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
-#define R_COMB 8
-#define R_AP 4
-#define R_STEREO_SPREAD 37
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#define TWO_PI (2.0f * (float)M_PI)
 
-/* Comb lengths (samples @ 44.1 kHz) span ~50–74 ms. Chosen odd, spread for
- * mutually incommensurate modes, scaled up from Freeverb's small-room values
- * for ambient-pad density. */
+#define R_COMB           8
+#define R_AP             4
+#define R_STEREO_SPREAD  37
+#define R_MOD_HEADROOM   64    /* extra samples per comb buffer for mod range */
+#define R_SAMPLE_RATE    44100
+
+/* Comb lengths (samples @ 44.1 kHz) span ~50–74 ms — scaled up from
+ * Freeverb's small-room values for ambient-pad modal density. */
 static const int R_COMB_BASE[R_COMB] = {
     2237, 2381, 2557, 2719, 2861, 2999, 3137, 3271
 };
-/* Allpass lengths ~8–14 ms. Four stages of serial diffusion smear the comb
- * sum into a continuous tail. */
 static const int R_AP_BASE[R_AP] = {
     347, 421, 511, 619
 };
 
+/* Per-comb LFO phase offsets — irregularly placed around the circle so the
+ * 8 mods never form a static phase relationship (avoids "synced wobble"). */
+static const float R_COMB_PHASE[R_COMB] = {
+    0.00f, 0.83f, 1.71f, 2.42f, 3.27f, 4.15f, 5.02f, 5.74f
+};
+
 struct reverb_s {
-    /* L channel state. */
+    /* L channel — combs */
     float *comb_buf_L[R_COMB];
-    int    comb_pos_L[R_COMB];
-    float  comb_damp_L[R_COMB];   /* 1-pole LPF state inside FB */
+    int    comb_buf_len_L[R_COMB];
+    int    comb_write_L[R_COMB];
+    float  comb_damp_L[R_COMB];
 
     float *ap_buf_L[R_AP];
+    int    ap_buf_len_L[R_AP];
     int    ap_pos_L[R_AP];
 
-    /* R channel — delays are R_COMB_BASE[i] + R_STEREO_SPREAD, APs too. */
+    /* R channel — combs (length includes stereo spread offset) */
     float *comb_buf_R[R_COMB];
-    int    comb_pos_R[R_COMB];
+    int    comb_buf_len_R[R_COMB];
+    int    comb_write_R[R_COMB];
     float  comb_damp_R[R_COMB];
 
     float *ap_buf_R[R_AP];
+    int    ap_buf_len_R[R_AP];
     int    ap_pos_R[R_AP];
 
-    /* Tunables. */
-    float fb;          /* comb feedback gain — set by reverb_set_decay */
-    float damp_a;      /* damping LPF coef (0..1, higher = darker) */
-    float ap_g;        /* allpass diffusion gain */
-    float input_gain;  /* attenuates input before injection into 8 combs */
-    float wet_gain;    /* final scaling of summed-then-diffused output */
+    /* Tunables */
+    float fb;
+    float damp_a;
+    float ap_g;
+    float input_gain;
+    float wet_gain;
+
+    /* Modulation */
+    lfo_t lfo;
+    float mod_depth_samples;  /* 0..R_MOD_HEADROOM/2 */
 };
 
 reverb_t* reverb_create(void) {
     reverb_t *r = (reverb_t*)calloc(1, sizeof(reverb_t));
     if (!r) return NULL;
     for (int i = 0; i < R_COMB; i++) {
-        r->comb_buf_L[i] = (float*)calloc((size_t)R_COMB_BASE[i], sizeof(float));
-        r->comb_buf_R[i] = (float*)calloc((size_t)(R_COMB_BASE[i] + R_STEREO_SPREAD), sizeof(float));
+        int Llen = R_COMB_BASE[i] + R_MOD_HEADROOM;
+        int Rlen = R_COMB_BASE[i] + R_STEREO_SPREAD + R_MOD_HEADROOM;
+        r->comb_buf_len_L[i] = Llen;
+        r->comb_buf_len_R[i] = Rlen;
+        r->comb_buf_L[i] = (float*)calloc((size_t)Llen, sizeof(float));
+        r->comb_buf_R[i] = (float*)calloc((size_t)Rlen, sizeof(float));
         if (!r->comb_buf_L[i] || !r->comb_buf_R[i]) { reverb_destroy(r); return NULL; }
     }
     for (int i = 0; i < R_AP; i++) {
-        r->ap_buf_L[i] = (float*)calloc((size_t)R_AP_BASE[i], sizeof(float));
-        r->ap_buf_R[i] = (float*)calloc((size_t)(R_AP_BASE[i] + R_STEREO_SPREAD), sizeof(float));
+        int Llen = R_AP_BASE[i];
+        int Rlen = R_AP_BASE[i] + R_STEREO_SPREAD;
+        r->ap_buf_len_L[i] = Llen;
+        r->ap_buf_len_R[i] = Rlen;
+        r->ap_buf_L[i] = (float*)calloc((size_t)Llen, sizeof(float));
+        r->ap_buf_R[i] = (float*)calloc((size_t)Rlen, sizeof(float));
         if (!r->ap_buf_L[i] || !r->ap_buf_R[i]) { reverb_destroy(r); return NULL; }
     }
-    r->fb = 0.78f;            /* matches decay=0.25 with the new curve */
-    r->damp_a = 0.55f;        /* fc ~4 kHz @ 44.1 kHz (darker than Freeverb default) */
+    r->fb = 0.78f;
+    r->damp_a = 0.55f;
     r->ap_g = 0.70f;
-    r->input_gain = 0.40f;    /* attenuate so 8 parallel combs don't pile hot */
-    r->wet_gain = 0.18f;      /* final scaling — tune by ear */
+    r->input_gain = 0.40f;
+    r->wet_gain = 0.18f;
+    lfo_init(&r->lfo, R_SAMPLE_RATE);
+    lfo_set_rate_hz(&r->lfo, 0.3f);
+    r->mod_depth_samples = 0.0f;
     return r;
 }
 
@@ -87,15 +114,25 @@ void reverb_set_decay(reverb_t *r, float decay_0_1) {
     if (!r) return;
     if (decay_0_1 < 0.0f) decay_0_1 = 0.0f;
     if (decay_0_1 > 1.0f) decay_0_1 = 1.0f;
-    /* Perceptual ~T60 curve. knob^0.4 expands the low-mid range so a 50%
-     * knob lands in "long hall" rather than "short room". Endpoints:
-     *   0.00 -> fb 0.50 (~250 ms tail)
-     *   0.25 -> fb 0.78 (~1 s)
-     *   0.50 -> fb 0.87 (~3 s)
-     *   0.75 -> fb 0.93 (~6 s)
-     *   1.00 -> fb 0.99 (15 s+, near-infinite) */
     float curve = powf(decay_0_1, 0.4f);
     r->fb = 0.50f + 0.49f * curve;
+}
+
+void reverb_set_mod_depth(reverb_t *r, float depth_0_1) {
+    if (!r) return;
+    if (depth_0_1 < 0.0f) depth_0_1 = 0.0f;
+    if (depth_0_1 > 1.0f) depth_0_1 = 1.0f;
+    /* Knob -> 0..30 samples (~±0.68 ms). Stays within R_MOD_HEADROOM/2 budget. */
+    r->mod_depth_samples = depth_0_1 * 30.0f;
+}
+
+void reverb_set_mod_rate(reverb_t *r, float rate_0_1) {
+    if (!r) return;
+    if (rate_0_1 < 0.0f) rate_0_1 = 0.0f;
+    if (rate_0_1 > 1.0f) rate_0_1 = 1.0f;
+    /* Log map: 0 -> 0.05 Hz, 0.5 -> ~0.63 Hz, 1 -> 8 Hz. */
+    float hz = 0.05f * expf(rate_0_1 * 5.075f);
+    lfo_set_rate_hz(&r->lfo, hz);
 }
 
 static inline float ap_tick(float *buf, int len, int *pos, float g, float x) {
@@ -107,6 +144,17 @@ static inline float ap_tick(float *buf, int len, int *pos, float g, float x) {
     p++; if (p >= len) p = 0;
     *pos = p;
     return y;
+}
+
+static inline float comb_read_interp(const float *buf, int buf_len,
+                                     int write_pos, float read_delay) {
+    int d_int = (int)read_delay;
+    float d_frac = read_delay - (float)d_int;
+    int ridx = write_pos - d_int;
+    if (ridx < 0) ridx += buf_len;
+    int ridx_next = ridx - 1;
+    if (ridx_next < 0) ridx_next += buf_len;
+    return buf[ridx] * (1.0f - d_frac) + buf[ridx_next] * d_frac;
 }
 
 void reverb_process(reverb_t *r,
@@ -121,39 +169,52 @@ void reverb_process(reverb_t *r,
     const float ap_g   = r->ap_g;
     const float in_g   = r->input_gain;
     const float out_g  = r->wet_gain;
+    const float mod_d  = r->mod_depth_samples;
+    const float lfo_inc = r->lfo.increment;
 
     for (int n = 0; n < frames; n++) {
+        /* Advance shared LFO phase once per sample. Each comb reads sin at
+         * its own phase offset for a decorrelated 8-voice modulation. */
+        r->lfo.phase += lfo_inc;
+        if (r->lfo.phase >= TWO_PI) r->lfo.phase -= TWO_PI;
+
         float xL = in_l[n] * in_g;
         float xR = in_r[n] * in_g;
 
-        /* Sum parallel damped combs. */
         float sumL = 0.0f, sumR = 0.0f;
         for (int i = 0; i < R_COMB; i++) {
-            int pL = r->comb_pos_L[i];
-            float yL = r->comb_buf_L[i][pL];
+            float mod = lfo_sine_at_offset(&r->lfo, R_COMB_PHASE[i]) * mod_d;
+
+            /* L comb */
+            float dL = (float)R_COMB_BASE[i] + mod;
+            float yL = comb_read_interp(r->comb_buf_L[i],
+                                        r->comb_buf_len_L[i],
+                                        r->comb_write_L[i], dL);
             float fL = damp_b * yL + damp_a * r->comb_damp_L[i];
             r->comb_damp_L[i] = fL;
-            r->comb_buf_L[i][pL] = xL + fb * fL;
-            pL++; if (pL >= R_COMB_BASE[i]) pL = 0;
-            r->comb_pos_L[i] = pL;
+            r->comb_buf_L[i][r->comb_write_L[i]] = xL + fb * fL;
+            r->comb_write_L[i]++;
+            if (r->comb_write_L[i] >= r->comb_buf_len_L[i]) r->comb_write_L[i] = 0;
             sumL += yL;
 
-            int pR = r->comb_pos_R[i];
-            float yR = r->comb_buf_R[i][pR];
+            /* R comb — same mod offset, longer base delay via stereo spread. */
+            float dR = (float)(R_COMB_BASE[i] + R_STEREO_SPREAD) + mod;
+            float yR = comb_read_interp(r->comb_buf_R[i],
+                                        r->comb_buf_len_R[i],
+                                        r->comb_write_R[i], dR);
             float fR = damp_b * yR + damp_a * r->comb_damp_R[i];
             r->comb_damp_R[i] = fR;
-            r->comb_buf_R[i][pR] = xR + fb * fR;
-            pR++; if (pR >= R_COMB_BASE[i] + R_STEREO_SPREAD) pR = 0;
-            r->comb_pos_R[i] = pR;
+            r->comb_buf_R[i][r->comb_write_R[i]] = xR + fb * fR;
+            r->comb_write_R[i]++;
+            if (r->comb_write_R[i] >= r->comb_buf_len_R[i]) r->comb_write_R[i] = 0;
             sumR += yR;
         }
 
-        /* Serial allpass diffusion. */
         float oL = sumL, oR = sumR;
         for (int i = 0; i < R_AP; i++) {
-            oL = ap_tick(r->ap_buf_L[i], R_AP_BASE[i],
+            oL = ap_tick(r->ap_buf_L[i], r->ap_buf_len_L[i],
                          &r->ap_pos_L[i], ap_g, oL);
-            oR = ap_tick(r->ap_buf_R[i], R_AP_BASE[i] + R_STEREO_SPREAD,
+            oR = ap_tick(r->ap_buf_R[i], r->ap_buf_len_R[i],
                          &r->ap_pos_R[i], ap_g, oR);
         }
 

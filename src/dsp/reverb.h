@@ -18,6 +18,13 @@ void      reverb_destroy(reverb_t *r);
 /* decay_0_1: 0 = short tail, 1 = very long tail. Maps to feedback gain. */
 void      reverb_set_decay(reverb_t *r, float decay_0_1);
 
+/* depth_0_1: 0 = no modulation, 1 = ~30 samples of comb delay modulation
+ * (about ±0.68 ms swing at 44.1 kHz). */
+void      reverb_set_mod_depth(reverb_t *r, float depth_0_1);
+
+/* rate_0_1: 0 = 0.05 Hz (very slow drift), 1 = 8 Hz (chorus-fast). Log-mapped. */
+void      reverb_set_mod_rate(reverb_t *r, float rate_0_1);
+
 /* Process stereo float buffers. in and out may NOT alias (in is read first
  * for the whole block via mono-sum; safest to use separate buffers). */
 void      reverb_process(reverb_t *r,
