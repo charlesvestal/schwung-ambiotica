@@ -85,9 +85,10 @@ void microloop_set_hold(microloop_t *m, float hold_0_1) {
         m->crossfade_remaining = M_CROSSFADE_LEN;
     }
 
-    /* Gain targets — process() ramps current → target per sample. Halved
-     * output so the micro-loop sits as a layer rather than the loudest thing. */
-    m->out_gain_target = 0.5f * sqrtf(hold_0_1);
+    /* Gain targets — process() ramps current → target per sample.
+     * Output is 0.25×sqrt(hold) so the micro-loop sits well below the loop
+     * and reverb tail levels — it's a subtle texture layer, not a feature. */
+    m->out_gain_target = 0.25f * sqrtf(hold_0_1);
     float fb_curve = hold_0_1 * 5.0f;
     if (fb_curve > 1.0f) fb_curve = 1.0f;
     m->fb_target = fb_curve * 0.95f;
