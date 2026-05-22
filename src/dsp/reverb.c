@@ -1,58 +1,85 @@
-/* 4-delay Hadamard FDN reverb + 2-stage allpass pre-diffuser. */
+/* Ambiotica reverb — Freeverb-scaled topology.
+ *
+ * 8 parallel damped combs -> 4 serial allpasses, per channel. True stereo
+ * via +37-sample spread on the R channel. Decay knob maps to comb feedback
+ * via a perceptual ~T60 curve (knob^0.4) so the low/mid knob range covers
+ * "short room" -> "long hall" rather than compressing everything into the top.
+ *
+ * Phase 2: static plate. Phase 3 will add LFO modulation on the comb delay
+ * read positions — that's where Slö's "breathing" character actually lives.
+ */
 #include "reverb.h"
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
-#define R_N 4
-#define R_AP 2
+#define R_COMB 8
+#define R_AP 4
+#define R_STEREO_SPREAD 37
 
-/* Delay lengths in samples at 44.1 kHz, chosen near-prime / mutually
- * incommensurate for good modal density. Range ~36 ms – 66 ms. */
-static const int R_D_LEN[R_N]   = { 1607, 2053, 2477, 2917 };
-/* Allpass lengths ~7.9 ms / 9.5 ms. Standard ratios. */
-static const int R_AP_LEN[R_AP] = { 347, 421 };
+/* Comb lengths (samples @ 44.1 kHz) span ~50–74 ms. Chosen odd, spread for
+ * mutually incommensurate modes, scaled up from Freeverb's small-room values
+ * for ambient-pad density. */
+static const int R_COMB_BASE[R_COMB] = {
+    2237, 2381, 2557, 2719, 2861, 2999, 3137, 3271
+};
+/* Allpass lengths ~8–14 ms. Four stages of serial diffusion smear the comb
+ * sum into a continuous tail. */
+static const int R_AP_BASE[R_AP] = {
+    347, 421, 511, 619
+};
 
 struct reverb_s {
-    /* Delay lines + circular write positions. */
-    float *d_buf[R_N];
-    int    d_pos[R_N];
+    /* L channel state. */
+    float *comb_buf_L[R_COMB];
+    int    comb_pos_L[R_COMB];
+    float  comb_damp_L[R_COMB];   /* 1-pole LPF state inside FB */
 
-    /* 1-pole damping LPF state, one per delay's feedback. */
-    float  damp_state[R_N];
+    float *ap_buf_L[R_AP];
+    int    ap_pos_L[R_AP];
 
-    /* Allpass pre-diffuser state. */
-    float *ap_buf[R_AP];
-    int    ap_pos[R_AP];
+    /* R channel — delays are R_COMB_BASE[i] + R_STEREO_SPREAD, APs too. */
+    float *comb_buf_R[R_COMB];
+    int    comb_pos_R[R_COMB];
+    float  comb_damp_R[R_COMB];
+
+    float *ap_buf_R[R_AP];
+    int    ap_pos_R[R_AP];
 
     /* Tunables. */
-    float fb;       /* feedback gain, set by reverb_set_decay() */
-    float damp_a;   /* damping LPF coefficient (0..1, higher = darker) */
-    float ap_g;     /* allpass diffusion gain */
+    float fb;          /* comb feedback gain — set by reverb_set_decay */
+    float damp_a;      /* damping LPF coef (0..1, higher = darker) */
+    float ap_g;        /* allpass diffusion gain */
+    float input_gain;  /* attenuates input before injection into 8 combs */
+    float wet_gain;    /* final scaling of summed-then-diffused output */
 };
 
 reverb_t* reverb_create(void) {
     reverb_t *r = (reverb_t*)calloc(1, sizeof(reverb_t));
     if (!r) return NULL;
-    for (int i = 0; i < R_N; i++) {
-        r->d_buf[i] = (float*)calloc((size_t)R_D_LEN[i], sizeof(float));
-        if (!r->d_buf[i]) { reverb_destroy(r); return NULL; }
+    for (int i = 0; i < R_COMB; i++) {
+        r->comb_buf_L[i] = (float*)calloc((size_t)R_COMB_BASE[i], sizeof(float));
+        r->comb_buf_R[i] = (float*)calloc((size_t)(R_COMB_BASE[i] + R_STEREO_SPREAD), sizeof(float));
+        if (!r->comb_buf_L[i] || !r->comb_buf_R[i]) { reverb_destroy(r); return NULL; }
     }
     for (int i = 0; i < R_AP; i++) {
-        r->ap_buf[i] = (float*)calloc((size_t)R_AP_LEN[i], sizeof(float));
-        if (!r->ap_buf[i]) { reverb_destroy(r); return NULL; }
+        r->ap_buf_L[i] = (float*)calloc((size_t)R_AP_BASE[i], sizeof(float));
+        r->ap_buf_R[i] = (float*)calloc((size_t)(R_AP_BASE[i] + R_STEREO_SPREAD), sizeof(float));
+        if (!r->ap_buf_L[i] || !r->ap_buf_R[i]) { reverb_destroy(r); return NULL; }
     }
-    /* Defaults: ~moderate tail, ~5 kHz damping, classic 0.7 allpass. */
-    r->fb = 0.70f;
-    r->damp_a = 0.49f;   /* fc ~5 kHz at 44.1 kHz */
+    r->fb = 0.78f;            /* matches decay=0.25 with the new curve */
+    r->damp_a = 0.55f;        /* fc ~4 kHz @ 44.1 kHz (darker than Freeverb default) */
     r->ap_g = 0.70f;
+    r->input_gain = 0.40f;    /* attenuate so 8 parallel combs don't pile hot */
+    r->wet_gain = 0.18f;      /* final scaling — tune by ear */
     return r;
 }
 
 void reverb_destroy(reverb_t *r) {
     if (!r) return;
-    for (int i = 0; i < R_N; i++)  free(r->d_buf[i]);
-    for (int i = 0; i < R_AP; i++) free(r->ap_buf[i]);
+    for (int i = 0; i < R_COMB; i++) { free(r->comb_buf_L[i]); free(r->comb_buf_R[i]); }
+    for (int i = 0; i < R_AP; i++)   { free(r->ap_buf_L[i]);   free(r->ap_buf_R[i]);   }
     free(r);
 }
 
@@ -60,10 +87,15 @@ void reverb_set_decay(reverb_t *r, float decay_0_1) {
     if (!r) return;
     if (decay_0_1 < 0.0f) decay_0_1 = 0.0f;
     if (decay_0_1 > 1.0f) decay_0_1 = 1.0f;
-    /* Exponential feel so the lush end of the range has more travel.
-     * 0.00 -> 0.500 (short),  0.50 -> 0.621,  1.00 -> 0.985 (very lush). */
-    float d2 = decay_0_1 * decay_0_1;
-    r->fb = 0.500f + 0.485f * d2;
+    /* Perceptual ~T60 curve. knob^0.4 expands the low-mid range so a 50%
+     * knob lands in "long hall" rather than "short room". Endpoints:
+     *   0.00 -> fb 0.50 (~250 ms tail)
+     *   0.25 -> fb 0.78 (~1 s)
+     *   0.50 -> fb 0.87 (~3 s)
+     *   0.75 -> fb 0.93 (~6 s)
+     *   1.00 -> fb 0.99 (15 s+, near-infinite) */
+    float curve = powf(decay_0_1, 0.4f);
+    r->fb = 0.50f + 0.49f * curve;
 }
 
 static inline float ap_tick(float *buf, int len, int *pos, float g, float x) {
@@ -85,46 +117,47 @@ void reverb_process(reverb_t *r,
 
     const float fb     = r->fb;
     const float damp_a = r->damp_a;
+    const float damp_b = 1.0f - damp_a;
     const float ap_g   = r->ap_g;
+    const float in_g   = r->input_gain;
+    const float out_g  = r->wet_gain;
 
     for (int n = 0; n < frames; n++) {
-        /* Mono sum at half-gain into pre-diffuser. */
-        float x = 0.5f * (in_l[n] + in_r[n]);
-        x = ap_tick(r->ap_buf[0], R_AP_LEN[0], &r->ap_pos[0], ap_g, x);
-        x = ap_tick(r->ap_buf[1], R_AP_LEN[1], &r->ap_pos[1], ap_g, x);
+        float xL = in_l[n] * in_g;
+        float xR = in_r[n] * in_g;
 
-        /* Read current tap from each delay. */
-        float t0 = r->d_buf[0][r->d_pos[0]];
-        float t1 = r->d_buf[1][r->d_pos[1]];
-        float t2 = r->d_buf[2][r->d_pos[2]];
-        float t3 = r->d_buf[3][r->d_pos[3]];
+        /* Sum parallel damped combs. */
+        float sumL = 0.0f, sumR = 0.0f;
+        for (int i = 0; i < R_COMB; i++) {
+            int pL = r->comb_pos_L[i];
+            float yL = r->comb_buf_L[i][pL];
+            float fL = damp_b * yL + damp_a * r->comb_damp_L[i];
+            r->comb_damp_L[i] = fL;
+            r->comb_buf_L[i][pL] = xL + fb * fL;
+            pL++; if (pL >= R_COMB_BASE[i]) pL = 0;
+            r->comb_pos_L[i] = pL;
+            sumL += yL;
 
-        /* 1-pole damping LPF on each feedback path. */
-        float ld0 = (1.0f - damp_a) * t0 + damp_a * r->damp_state[0]; r->damp_state[0] = ld0;
-        float ld1 = (1.0f - damp_a) * t1 + damp_a * r->damp_state[1]; r->damp_state[1] = ld1;
-        float ld2 = (1.0f - damp_a) * t2 + damp_a * r->damp_state[2]; r->damp_state[2] = ld2;
-        float ld3 = (1.0f - damp_a) * t3 + damp_a * r->damp_state[3]; r->damp_state[3] = ld3;
+            int pR = r->comb_pos_R[i];
+            float yR = r->comb_buf_R[i][pR];
+            float fR = damp_b * yR + damp_a * r->comb_damp_R[i];
+            r->comb_damp_R[i] = fR;
+            r->comb_buf_R[i][pR] = xR + fb * fR;
+            pR++; if (pR >= R_COMB_BASE[i] + R_STEREO_SPREAD) pR = 0;
+            r->comb_pos_R[i] = pR;
+            sumR += yR;
+        }
 
-        /* Hadamard 4x4 mix (normalized by 1/2). */
-        float m0 = 0.5f * ( ld0 + ld1 + ld2 + ld3);
-        float m1 = 0.5f * ( ld0 - ld1 + ld2 - ld3);
-        float m2 = 0.5f * ( ld0 + ld1 - ld2 - ld3);
-        float m3 = 0.5f * ( ld0 - ld1 - ld2 + ld3);
+        /* Serial allpass diffusion. */
+        float oL = sumL, oR = sumR;
+        for (int i = 0; i < R_AP; i++) {
+            oL = ap_tick(r->ap_buf_L[i], R_AP_BASE[i],
+                         &r->ap_pos_L[i], ap_g, oL);
+            oR = ap_tick(r->ap_buf_R[i], R_AP_BASE[i] + R_STEREO_SPREAD,
+                         &r->ap_pos_R[i], ap_g, oR);
+        }
 
-        /* Inject input + scaled feedback. */
-        r->d_buf[0][r->d_pos[0]] = x + fb * m0;
-        r->d_buf[1][r->d_pos[1]] = x + fb * m1;
-        r->d_buf[2][r->d_pos[2]] = x + fb * m2;
-        r->d_buf[3][r->d_pos[3]] = x + fb * m3;
-
-        /* Advance write positions. */
-        if (++r->d_pos[0] >= R_D_LEN[0]) r->d_pos[0] = 0;
-        if (++r->d_pos[1] >= R_D_LEN[1]) r->d_pos[1] = 0;
-        if (++r->d_pos[2] >= R_D_LEN[2]) r->d_pos[2] = 0;
-        if (++r->d_pos[3] >= R_D_LEN[3]) r->d_pos[3] = 0;
-
-        /* Decorrelated stereo: (d0 - d2) vs (d1 - d3). */
-        out_l[n] = t0 - t2;
-        out_r[n] = t1 - t3;
+        out_l[n] = oL * out_g;
+        out_r[n] = oR * out_g;
     }
 }
