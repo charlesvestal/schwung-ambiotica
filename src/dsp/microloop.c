@@ -10,7 +10,9 @@
 #define M_MAX_LEN_SAMPLES   176400   /* 4 s   @ 44.1 kHz */
 #define M_AUTO_FREEZE       0.95f    /* knob threshold for auto-engaged freeze */
 #define M_SMOOTH_COEF       0.9989f  /* ~20 ms — for fb / out_gain */
-#define M_LEN_SMOOTH_COEF   0.99955f /* ~50 ms — for loop_len so transitions are gentle pitch glides not clicks */
+#define M_CROSSFADE_LEN     512      /* ~11.6 ms — equal-power crossfade between
+                                         old and new read positions when loop_len
+                                         changes. No pitch glide, no click. */
 
 struct microloop_s {
     float *buf_L;
@@ -20,12 +22,17 @@ struct microloop_s {
     float  hold;       /* 0..1 — both loop length and blend amount */
     int    freeze;     /* external freeze flag (alt-state) */
 
-    /* Smoothed targets — process() ramps the live state per sample so knob
-     * changes don't inject clicks into the feedback buffer. */
+    /* Smoothed gains. */
     float  fb_target,       fb_current;
     float  out_gain_target, out_gain_current;
-    float  loop_len_target;     /* integer count, but float for smoothing */
-    float  loop_len_current;    /* fractional read position offset */
+
+    /* Loop length crossfade state. set_hold changes loop_len_pending and
+     * starts a crossfade. If another change arrives mid-crossfade it queues. */
+    int    loop_len_current;
+    int    loop_len_pending;
+    int    loop_len_queued;
+    int    has_queued;
+    int    crossfade_remaining;  /* samples left in current crossfade, or 0 */
 };
 
 microloop_t* microloop_create(void) {
@@ -35,8 +42,10 @@ microloop_t* microloop_create(void) {
     m->buf_L = (float*)calloc((size_t)m->buf_capacity, sizeof(float));
     m->buf_R = (float*)calloc((size_t)m->buf_capacity, sizeof(float));
     if (!m->buf_L || !m->buf_R) { microloop_destroy(m); return NULL; }
-    m->loop_len_target  = (float)M_MIN_LEN_SAMPLES;
-    m->loop_len_current = (float)M_MIN_LEN_SAMPLES;
+    m->loop_len_current = M_MIN_LEN_SAMPLES;
+    m->loop_len_pending = M_MIN_LEN_SAMPLES;
+    m->has_queued = 0;
+    m->crossfade_remaining = 0;
     m->hold = 0.0f;
     m->freeze = 0;
     return m;
@@ -63,10 +72,22 @@ void microloop_set_hold(microloop_t *m, float hold_0_1) {
     int len = (int)expf(exponent);
     if (len < M_MIN_LEN_SAMPLES) len = M_MIN_LEN_SAMPLES;
     if (len > M_MAX_LEN_SAMPLES) len = M_MAX_LEN_SAMPLES;
-    m->loop_len_target = (float)len;
 
-    /* Update smoothing targets. process() ramps current → target per sample. */
-    m->out_gain_target = sqrtf(hold_0_1);
+    /* Loop length change — crossfade, not glide. If a crossfade is already
+     * in progress, queue the new value so we don't keep restarting. */
+    if (m->crossfade_remaining > 0) {
+        if (len != m->loop_len_pending) {
+            m->loop_len_queued = len;
+            m->has_queued = 1;
+        }
+    } else if (len != m->loop_len_current) {
+        m->loop_len_pending = len;
+        m->crossfade_remaining = M_CROSSFADE_LEN;
+    }
+
+    /* Gain targets — process() ramps current → target per sample. Halved
+     * output so the micro-loop sits as a layer rather than the loudest thing. */
+    m->out_gain_target = 0.5f * sqrtf(hold_0_1);
     float fb_curve = hold_0_1 * 5.0f;
     if (fb_curve > 1.0f) fb_curve = 1.0f;
     m->fb_target = fb_curve * 0.95f;
@@ -87,36 +108,54 @@ void microloop_process(microloop_t *m,
     const int buf_capacity = m->buf_capacity;
     int write_pos = m->write_pos;
 
-    /* Smoothed values — ramp per sample toward target. */
+    /* Smoothed gains — ramp per sample toward target. */
     float fb_curr   = m->fb_current;
     float out_curr  = m->out_gain_current;
-    float len_curr  = m->loop_len_current;
     const float fb_t  = m->fb_target;
     const float out_t = m->out_gain_target;
-    const float len_t = m->loop_len_target;
     const float c     = M_SMOOTH_COEF;
     const float ic    = 1.0f - c;
-    const float lc    = M_LEN_SMOOTH_COEF;
-    const float lic   = 1.0f - lc;
 
     for (int n = 0; n < frames; n++) {
-        fb_curr  = c  * fb_curr  + ic  * fb_t;
-        out_curr = c  * out_curr + ic  * out_t;
-        len_curr = lc * len_curr + lic * len_t;
+        fb_curr  = c * fb_curr  + ic * fb_t;
+        out_curr = c * out_curr + ic * out_t;
 
-        /* Fractional delay read — linearly interpolate between the two
-         * adjacent samples so smoothed loop_len changes don't click. */
-        float ldelay = len_curr;
-        if (ldelay < 1.0f) ldelay = 1.0f;
-        if (ldelay > (float)(buf_capacity - 1)) ldelay = (float)(buf_capacity - 1);
-        int   li = (int)ldelay;
-        float lf = ldelay - (float)li;
-        int read_pos = write_pos - li;
-        if (read_pos < 0) read_pos += buf_capacity;
-        int read_pos_back = read_pos - 1;
-        if (read_pos_back < 0) read_pos_back += buf_capacity;
-        float read_L = m->buf_L[read_pos] * (1.0f - lf) + m->buf_L[read_pos_back] * lf;
-        float read_R = m->buf_R[read_pos] * (1.0f - lf) + m->buf_R[read_pos_back] * lf;
+        /* Read from current loop length. */
+        int read_pos_a = write_pos - m->loop_len_current;
+        if (read_pos_a < 0) read_pos_a += buf_capacity;
+        float read_a_L = m->buf_L[read_pos_a];
+        float read_a_R = m->buf_R[read_pos_a];
+
+        float read_L, read_R;
+        if (m->crossfade_remaining > 0) {
+            /* During crossfade, also read from pending position and blend. */
+            int read_pos_b = write_pos - m->loop_len_pending;
+            if (read_pos_b < 0) read_pos_b += buf_capacity;
+            float read_b_L = m->buf_L[read_pos_b];
+            float read_b_R = m->buf_R[read_pos_b];
+
+            float t = (float)(M_CROSSFADE_LEN - m->crossfade_remaining) *
+                      (1.0f / (float)M_CROSSFADE_LEN);
+            /* Equal-power crossfade. */
+            float gain_a = cosf(t * (float)M_PI * 0.5f);
+            float gain_b = sinf(t * (float)M_PI * 0.5f);
+            read_L = gain_a * read_a_L + gain_b * read_b_L;
+            read_R = gain_a * read_a_R + gain_b * read_b_R;
+
+            m->crossfade_remaining--;
+            if (m->crossfade_remaining == 0) {
+                m->loop_len_current = m->loop_len_pending;
+                /* Promote queued change if any waiting. */
+                if (m->has_queued && m->loop_len_queued != m->loop_len_current) {
+                    m->loop_len_pending = m->loop_len_queued;
+                    m->crossfade_remaining = M_CROSSFADE_LEN;
+                }
+                m->has_queued = 0;
+            }
+        } else {
+            read_L = read_a_L;
+            read_R = read_a_R;
+        }
 
         /* Output: ONLY the loop content. Caller mixes in dry passthrough. */
         out_l[n] = out_curr * read_L;
@@ -138,5 +177,4 @@ void microloop_process(microloop_t *m,
     m->write_pos = write_pos;
     m->fb_current = fb_curr;
     m->out_gain_current = out_curr;
-    m->loop_len_current = len_curr;
 }
