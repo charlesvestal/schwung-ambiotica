@@ -3,7 +3,6 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 
 struct looper_s {
     float *buf_L;
