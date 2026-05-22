@@ -4,10 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define M_SAMPLE_RATE     44100
-#define M_MIN_LEN_SAMPLES (M_SAMPLE_RATE / 20)         /* 50 ms */
-#define M_MAX_LEN_SAMPLES (4 * M_SAMPLE_RATE)          /* 4 s */
-#define M_AUTO_FREEZE     0.95f                        /* knob threshold */
+#define M_SAMPLE_RATE      44100
+#define M_MIN_LEN_SAMPLES  2205     /* 50 ms @ 44.1 kHz */
+#define M_MAX_LEN_SAMPLES  176400   /* 4 s  @ 44.1 kHz */
+#define M_AUTO_FREEZE      0.95f    /* knob threshold for auto-engaged freeze */
 
 struct microloop_s {
     float *buf_L;
