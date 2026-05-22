@@ -9,7 +9,7 @@
 #include "reverb.h"
 
 #define AMB_SAMPLE_RATE 44100
-#define AMB_LOOPER_SECONDS 30
+#define AMB_LOOPER_SECONDS 6
 
 #include <stdint.h>
 #include <stdlib.h>
