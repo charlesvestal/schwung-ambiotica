@@ -71,10 +71,10 @@ void looper_set_layer(looper_t *l, float layer_0_1) {
     if (!l) return;
     if (layer_0_1 < 0.0f) layer_0_1 = 0.0f;
     if (layer_0_1 > 1.0f) layer_0_1 = 1.0f;
-    /* knob^2 curve so the bottom half is much quieter (perceptually useful
-     * range) and only the top quarter gets into "lush layered loop" territory.
-     * Cap at 0.95 prevents uncontrolled growth on sustained input. */
-    l->fb_target = layer_0_1 * layer_0_1 * 0.95f;
+    /* knob^2 curve for perceptual feel — soft start, lush mid, infinite top.
+     * At knob = 1.0 fb = 1.0 (true looper, no decay). Soft-clip in process()
+     * prevents amplitude runaway from sustained input + unity feedback. */
+    l->fb_target = layer_0_1 * layer_0_1;
 }
 
 void looper_clear(looper_t *l) {
