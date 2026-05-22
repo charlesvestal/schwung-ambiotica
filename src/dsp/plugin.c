@@ -164,21 +164,22 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
 
     /* Final mix.
      *
-     * wet_bus = loop_direct + reverb_tail
+     * wet_bus = post-stage-3 signal (looper+granular+passthrough) + reverb_tail
      * out     = (1-mix)*dry + mix*wet_bus
      *
-     * The loop signal is extracted (stage - dry) and added straight to the
-     * wet bus alongside the reverb tail — without going through the reverb's
-     * internal input/output attenuation. This keeps the loop audible at full
-     * strength while the reverb tail remains a subtle "added" layer.
+     * No subtraction. The wet bus is the chain output up through stage 3
+     * (which at zero settings ≈ dry, with effects ≈ processed signal) plus
+     * the reverb tail. Mix blends dry vs that whole wet path. This avoids
+     * leaking the granular's transformation into the dry signal — at zero
+     * settings stage_l ≈ dry_l so Mix=1 sounds approximately like dry +
+     * reverb tail; with effects active it cleanly carries them in the wet
+     * bus only.
      */
     const float mix = inst->mix;
     const float dry_g = 1.0f - mix;
     for (int i = 0; i < frames; i++) {
-        float loop_l = stage_l[i] - dry_l[i];
-        float loop_r = stage_r[i] - dry_r[i];
-        float wet_bus_l = loop_l + wet_l[i];
-        float wet_bus_r = loop_r + wet_r[i];
+        float wet_bus_l = stage_l[i] + wet_l[i];
+        float wet_bus_r = stage_r[i] + wet_r[i];
         float l = dry_g * dry_l[i] + mix * wet_bus_l;
         float r = dry_g * dry_r[i] + mix * wet_bus_r;
         if (l >  1.0f) l =  1.0f; else if (l < -1.0f) l = -1.0f;
