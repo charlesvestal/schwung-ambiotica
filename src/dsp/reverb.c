@@ -20,7 +20,7 @@
 #define R_COMB           8
 #define R_AP             4
 #define R_STEREO_SPREAD  37
-#define R_MOD_HEADROOM   64    /* extra samples per comb buffer for mod range */
+#define R_MOD_HEADROOM   256   /* extra samples per comb buffer for mod range */
 #define R_SAMPLE_RATE    44100
 
 /* Comb lengths (samples @ 44.1 kHz) span ~50–74 ms — scaled up from
@@ -122,8 +122,11 @@ void reverb_set_mod_depth(reverb_t *r, float depth_0_1) {
     if (!r) return;
     if (depth_0_1 < 0.0f) depth_0_1 = 0.0f;
     if (depth_0_1 > 1.0f) depth_0_1 = 1.0f;
-    /* Knob -> 0..30 samples (~±0.68 ms). Stays within R_MOD_HEADROOM/2 budget. */
-    r->mod_depth_samples = depth_0_1 * 30.0f;
+    /* Knob -> 0..120 samples (~±2.7 ms) with depth^1.5 curve. Low knob stays
+     * subtle (chorus-y), upper half opens up into Slö-style warble. Within
+     * R_MOD_HEADROOM/2 = 128 sample budget. */
+    float curve = depth_0_1 * sqrtf(depth_0_1);  /* depth^1.5 */
+    r->mod_depth_samples = curve * 120.0f;
 }
 
 void reverb_set_mod_rate(reverb_t *r, float rate_0_1) {
