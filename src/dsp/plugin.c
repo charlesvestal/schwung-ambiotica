@@ -37,7 +37,7 @@ typedef struct {
 static const amb_preset_t AMB_PRESETS[AMB_MODE_COUNT] = {
     /* Mismember — chaotic glitch / pointillistic texture. */
     { .mix = 0.50f, .loop_layer = 0.87f, .grain_size = 0.25f, .scatter = 0.80f,
-      .micro_hold = 0.27f, .decay = 0.50f, .mod_depth = 0.50f, .mod_rate = 0.60f },
+      .micro_hold = 0.18f, .decay = 0.50f, .mod_depth = 0.50f, .mod_rate = 0.60f },
     /* Loona — clean rolling-capture loops, short reverb. Loop_layer high so
      * a single phrase clearly returns at 6 s; decay low so it isn't washed. */
     { .mix = 0.50f, .loop_layer = 0.95f, .grain_size = 0.90f, .scatter = 0.05f,
@@ -120,7 +120,7 @@ static void* amb_create(const char *module_dir, const char *config_json) {
     inst->loop_layer = 0.87f;
     inst->grain_size = 0.25f;
     inst->scatter = 0.80f;
-    inst->micro_hold = 0.27f;
+    inst->micro_hold = 0.18f;
     inst->decay = 0.50f;
     inst->mod_depth = 0.50f;
     inst->mod_rate = 0.60f;
