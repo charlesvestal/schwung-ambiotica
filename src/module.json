@@ -3,13 +3,14 @@
   "name": "Ambiotica",
   "abbrev": "AMB",
   "version": "0.1.0",
-  "description": "Ambient chain: rolling looper -> granular -> micro-loop -> modulated reverb. Four modes (Loona, Mismember, NAPS, Flow).",
+  "description": "Ambient chain: rolling looper -> granular -> micro-loop -> modulated reverb. Four modes (Mismember, Loona, NAPS, Flow).",
   "author": "Charles Vestal",
   "license": "MIT",
   "dsp": "ambiotica.so",
   "api_version": 2,
   "capabilities": {
     "chainable": true,
-    "component_type": "audio_fx"
+    "component_type": "audio_fx",
+    "requires_continuous_processing": true
   }
 }
