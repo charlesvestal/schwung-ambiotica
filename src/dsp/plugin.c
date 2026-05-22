@@ -65,10 +65,6 @@ typedef struct {
     float mod_depth;
     float mod_rate;
 
-    int   mix_kill_dry;
-    int   grain_glitchy;
-    int   micro_freeze;
-    int   decay_infinite;
     int   mod_sync;
     int   mod_shape;     /* 0=sine, 1=warp, 2=sink */
 
@@ -196,7 +192,6 @@ static void* amb_create(const char *module_dir, const char *config_json) {
     if (!inst->granular) { looper_destroy(inst->looper); free(inst); return NULL; }
     granular_set_grain_size(inst->granular, inst->grain_size);
     granular_set_scatter(inst->granular, inst->scatter);
-    granular_set_glitchy(inst->granular, inst->grain_glitchy);
 
     inst->microloop = microloop_create();
     if (!inst->microloop) {
@@ -205,7 +200,6 @@ static void* amb_create(const char *module_dir, const char *config_json) {
         free(inst); return NULL;
     }
     microloop_set_hold(inst->microloop, inst->micro_hold);
-    microloop_set_freeze(inst->microloop, inst->micro_freeze);
 
     inst->reverb = reverb_create();
     if (!inst->reverb) {
@@ -300,9 +294,8 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
     reverb_process(inst->reverb, rev_in_l, rev_in_r, wet_l, wet_r, frames);
 
     /* Final mix: wet bus = layered + micro + reverb tail.
-     * Smooth the Mix knob per-sample so abrupt knob changes don't click.
-     * mix_kill_dry forces all-wet (dry_g = 0) regardless of Mix knob. */
-    const float mix_target = inst->mix_kill_dry ? 1.0f : inst->mix;
+     * Smooth the Mix knob per-sample so abrupt knob changes don't click. */
+    const float mix_target = inst->mix;
     float mix_curr = inst->mix_current;
     const float c = 0.9989f;  /* ~20 ms time constant */
     const float ic = 1.0f - c;
@@ -333,13 +326,6 @@ static void amb_set_state(amb_instance_t *inst, const char *val) {
     if (json_get_float(val, "decay",       &f) == 0) { inst->decay = f; reverb_set_decay(inst->reverb, f); }
     if (json_get_float(val, "mod_depth",   &f) == 0) { inst->mod_depth = f; reverb_set_mod_depth(inst->reverb, f); }
     if (json_get_float(val, "mod_rate",    &f) == 0) { inst->mod_rate = f; reverb_set_mod_rate(inst->reverb, f); }
-    if (json_get_int  (val, "mix_kill_dry",   &i) == 0) inst->mix_kill_dry   = i ? 1 : 0;
-    if (json_get_int  (val, "grain_glitchy",  &i) == 0) { inst->grain_glitchy  = i ? 1 : 0; granular_set_glitchy(inst->granular, inst->grain_glitchy); }
-    if (json_get_int  (val, "micro_freeze",   &i) == 0) { inst->micro_freeze   = i ? 1 : 0; microloop_set_freeze(inst->microloop, inst->micro_freeze); }
-    if (json_get_int  (val, "decay_infinite", &i) == 0) {
-        inst->decay_infinite = i ? 1 : 0;
-        reverb_set_decay_infinite(inst->reverb, inst->decay_infinite);
-    }
     if (json_get_int  (val, "mod_sync",       &i) == 0) {
         inst->mod_sync = i ? 1 : 0;
         amb_apply_mod_rate(inst);
@@ -413,25 +399,6 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
         amb_apply_mod_rate(inst);
         return;
     }
-    if (strcmp(key, "mix_kill_dry") == 0)   {
-        inst->mix_kill_dry = atoi(val) ? 1 : 0;
-        return;
-    }
-    if (strcmp(key, "grain_glitchy") == 0)  {
-        inst->grain_glitchy = atoi(val) ? 1 : 0;
-        granular_set_glitchy(inst->granular, inst->grain_glitchy);
-        return;
-    }
-    if (strcmp(key, "micro_freeze") == 0)   {
-        inst->micro_freeze = atoi(val) ? 1 : 0;
-        microloop_set_freeze(inst->microloop, inst->micro_freeze);
-        return;
-    }
-    if (strcmp(key, "decay_infinite") == 0) {
-        inst->decay_infinite = atoi(val) ? 1 : 0;
-        reverb_set_decay_infinite(inst->reverb, inst->decay_infinite);
-        return;
-    }
     if (strcmp(key, "mod_sync") == 0)       {
         inst->mod_sync = atoi(val) ? 1 : 0;
         amb_apply_mod_rate(inst);
@@ -465,7 +432,7 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
         microloop_set_hold(inst->microloop, inst->micro_hold);
         reverb_set_decay(inst->reverb, inst->decay);
         reverb_set_mod_depth(inst->reverb, inst->mod_depth);
-        reverb_set_mod_rate(inst->reverb, inst->mod_rate);
+        amb_apply_mod_rate(inst);
         return;
     }
 }
@@ -485,10 +452,6 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
     else if (strcmp(key, "decay") == 0)       n = snprintf(buf, buf_len, "%.3f", inst->decay);
     else if (strcmp(key, "mod_depth") == 0)   n = snprintf(buf, buf_len, "%.3f", inst->mod_depth);
     else if (strcmp(key, "mod_rate") == 0)    n = snprintf(buf, buf_len, "%.3f", inst->mod_rate);
-    else if (strcmp(key, "mix_kill_dry") == 0)   n = snprintf(buf, buf_len, "%d", inst->mix_kill_dry);
-    else if (strcmp(key, "grain_glitchy") == 0)  n = snprintf(buf, buf_len, "%d", inst->grain_glitchy);
-    else if (strcmp(key, "micro_freeze") == 0)   n = snprintf(buf, buf_len, "%d", inst->micro_freeze);
-    else if (strcmp(key, "decay_infinite") == 0) n = snprintf(buf, buf_len, "%d", inst->decay_infinite);
     else if (strcmp(key, "mod_sync") == 0)       n = snprintf(buf, buf_len, "%d", inst->mod_sync);
     else if (strcmp(key, "mod_shape") == 0)      n = snprintf(buf, buf_len, "%d", inst->mod_shape);
     else if (strcmp(key, "mode") == 0)        n = snprintf(buf, buf_len, "%d", inst->mode);
@@ -502,14 +465,12 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
             "{\"mode\":%d,"
             "\"mix\":%.4f,\"loop_layer\":%.4f,\"grain_size\":%.4f,\"scatter\":%.4f,"
             "\"micro_hold\":%.4f,\"decay\":%.4f,\"mod_depth\":%.4f,\"mod_rate\":%.4f,"
-            "\"mix_kill_dry\":%d,\"grain_glitchy\":%d,\"micro_freeze\":%d,"
-            "\"decay_infinite\":%d,\"mod_sync\":%d,\"mod_shape\":%d,"
+            "\"mod_sync\":%d,\"mod_shape\":%d,"
             "\"loop_length\":%.2f}",
             inst->mode,
             inst->mix, inst->loop_layer, inst->grain_size, inst->scatter,
             inst->micro_hold, inst->decay, inst->mod_depth, inst->mod_rate,
-            inst->mix_kill_dry, inst->grain_glitchy, inst->micro_freeze,
-            inst->decay_infinite, inst->mod_sync, inst->mod_shape,
+            inst->mod_sync, inst->mod_shape,
             inst->loop_length_bars);
     }
     else if (strcmp(key, "chain_params") == 0) {
@@ -524,10 +485,6 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
             "{\"key\":\"decay\",\"name\":\"Decay\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"mod_depth\",\"name\":\"Mod Depth\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"mod_rate\",\"name\":\"Mod Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-            "{\"key\":\"mix_kill_dry\",\"name\":\"Kill Dry\",\"type\":\"int\",\"min\":0,\"max\":1},"
-            "{\"key\":\"grain_glitchy\",\"name\":\"Glitchy Grain\",\"type\":\"int\",\"min\":0,\"max\":1},"
-            "{\"key\":\"micro_freeze\",\"name\":\"Infinite Hold\",\"type\":\"int\",\"min\":0,\"max\":1},"
-            "{\"key\":\"decay_infinite\",\"name\":\"Infinite Decay\",\"type\":\"int\",\"min\":0,\"max\":1},"
             "{\"key\":\"mod_sync\",\"name\":\"Tempo Sync\",\"type\":\"int\",\"min\":0,\"max\":1},"
             "{\"key\":\"mod_shape\",\"name\":\"Mod Shape\",\"type\":\"enum\",\"options\":[\"Sine\",\"Warp\",\"Sink\"]},"
             "{\"key\":\"loop_length\",\"name\":\"Loop Length\",\"type\":\"float\",\"min\":0.5,\"max\":8,\"step\":0.5,\"unit\":\"bars\"}"
@@ -554,27 +511,16 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
                     "{\"key\":\"decay\",\"label\":\"Decay\"},"
                     "{\"key\":\"mod_depth\",\"label\":\"Mod Depth\"},"
                     "{\"key\":\"mod_rate\",\"label\":\"Mod Rate\"},"
-                    "{\"level\":\"alt\",\"label\":\"Performance Shortcuts\"},"
                     "{\"level\":\"settings\",\"label\":\"Settings\"}"
-                  "]"
-                "},"
-                "\"alt\":{"
-                  "\"label\":\"Performance Shortcuts\","
-                  "\"knobs\":[],"
-                  "\"params\":["
-                    "{\"key\":\"mix_kill_dry\",\"label\":\"Kill Dry\"},"
-                    "{\"key\":\"grain_glitchy\",\"label\":\"Glitchy Grain\"},"
-                    "{\"key\":\"micro_freeze\",\"label\":\"Infinite Hold\"},"
-                    "{\"key\":\"decay_infinite\",\"label\":\"Infinite Decay\"},"
-                    "{\"key\":\"mod_sync\",\"label\":\"Tempo Sync\"},"
-                    "{\"key\":\"mod_shape\",\"label\":\"Mod Shape\"}"
                   "]"
                 "},"
                 "\"settings\":{"
                   "\"label\":\"Settings\","
                   "\"knobs\":[],"
                   "\"params\":["
-                    "{\"key\":\"loop_length\",\"label\":\"Loop Length\"}"
+                    "{\"key\":\"loop_length\",\"label\":\"Loop Length\"},"
+                    "{\"key\":\"mod_shape\",\"label\":\"Mod Shape\"},"
+                    "{\"key\":\"mod_sync\",\"label\":\"Tempo Sync\"}"
                   "]"
                 "}"
               "}"

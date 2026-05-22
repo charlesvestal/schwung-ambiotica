@@ -20,7 +20,6 @@ struct microloop_s {
     int    buf_capacity;
     int    write_pos;
     float  hold;       /* 0..1 — both loop length and blend amount */
-    int    freeze;     /* external freeze flag (alt-state) */
 
     /* Smoothed gains. */
     float  fb_target,       fb_current;
@@ -47,7 +46,6 @@ microloop_t* microloop_create(void) {
     m->has_queued = 0;
     m->crossfade_remaining = 0;
     m->hold = 0.0f;
-    m->freeze = 0;
     return m;
 }
 
@@ -94,18 +92,13 @@ void microloop_set_hold(microloop_t *m, float hold_0_1) {
     m->fb_target = fb_curve * 0.95f;
 }
 
-void microloop_set_freeze(microloop_t *m, int freeze) {
-    if (!m) return;
-    m->freeze = freeze ? 1 : 0;
-}
-
 void microloop_process(microloop_t *m,
                       const float *in_l, const float *in_r,
                       float *out_l, float *out_r,
                       int frames) {
     if (!m || frames <= 0) return;
-    /* Auto-engage freeze when knob approaches max, OR if alt-state demands it. */
-    const int frozen = m->freeze || (m->hold >= M_AUTO_FREEZE);
+    /* Auto-engage freeze when knob approaches max. */
+    const int frozen = (m->hold >= M_AUTO_FREEZE);
     const int buf_capacity = m->buf_capacity;
     int write_pos = m->write_pos;
 

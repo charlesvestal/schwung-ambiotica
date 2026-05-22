@@ -25,7 +25,6 @@ microloop_t* microloop_create(void);
 void         microloop_destroy(microloop_t *m);
 
 void         microloop_set_hold(microloop_t *m, float hold_0_1);
-void         microloop_set_freeze(microloop_t *m, int freeze);
 
 void         microloop_process(microloop_t *m,
                                const float *in_l, const float *in_r,

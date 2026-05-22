@@ -25,10 +25,6 @@ void        granular_set_grain_size(granular_t *g, float size_0_1);
  * full buffer-wide position randomness. */
 void        granular_set_scatter(granular_t *g, float scatter_0_1);
 
-/* glitchy: 0 = Hann window (smooth, overlap-adds), 1 = rectangular (hard
- * grain edges — glitch / chop character). */
-void        granular_set_glitchy(granular_t *g, int glitchy);
-
 void        granular_process(granular_t *g,
                              const float *in_l, const float *in_r,
                              float *out_l, float *out_r,

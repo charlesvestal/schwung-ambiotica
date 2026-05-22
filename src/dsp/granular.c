@@ -49,7 +49,6 @@ struct granular_s {
     /* Params */
     float grain_size_0_1;
     float scatter_0_1;
-    int   glitchy;
 
     /* LCG RNG */
     uint32_t rng;
@@ -131,7 +130,6 @@ granular_t* granular_create(void) {
     if (!g->buf_L || !g->buf_R) { granular_destroy(g); return NULL; }
     g->grain_size_0_1 = 0.5f;
     g->scatter_0_1 = 0.0f;
-    g->glitchy = 0;
     g->rng = 0x12345678u;
     g->samples_to_next = current_grain_length(g) / 2;
     return g;
@@ -158,11 +156,6 @@ void granular_set_scatter(granular_t *g, float scatter_0_1) {
     g->scatter_0_1 = scatter_0_1;
 }
 
-void granular_set_glitchy(granular_t *g, int glitchy) {
-    if (!g) return;
-    g->glitchy = glitchy ? 1 : 0;
-}
-
 void granular_process(granular_t *g,
                       const float *in_l, const float *in_r,
                       float *out_l, float *out_r,
@@ -170,7 +163,6 @@ void granular_process(granular_t *g,
     if (!g || frames <= 0) return;
 
     const int buf_len = g->buf_len;
-    const int glitchy = g->glitchy;
 
     for (int n = 0; n < frames; n++) {
         /* 1. Write current input to capture buffer. */
@@ -200,14 +192,9 @@ void granular_process(granular_t *g,
             float yl = g->buf_L[pi] * (1.0f - pf) + g->buf_L[pi2] * pf;
             float yr = g->buf_R[pi] * (1.0f - pf) + g->buf_R[pi2] * pf;
 
-            /* Envelope: Hann (smooth, overlap-adds to ~1.0) or rectangular. */
-            float env;
-            if (glitchy) {
-                env = 1.0f;
-            } else {
-                float phase = (float)gr->age / (float)gr->length;
-                env = 0.5f * (1.0f - cosf(TWO_PI * phase));
-            }
+            /* Envelope: Hann (smooth, overlap-adds to ~1.0). */
+            float phase = (float)gr->age / (float)gr->length;
+            float env = 0.5f * (1.0f - cosf(TWO_PI * phase));
 
             sum_l += yl * env;
             sum_r += yr * env;

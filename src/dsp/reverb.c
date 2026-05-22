@@ -80,10 +80,6 @@ struct reverb_s {
     float base_rate_hz;       /* user-set rate before per-comb multiplication */
     float mod_depth_target,    mod_depth_current;  /* 0..R_MOD_HEADROOM/2 */
     int   mod_shape;           /* 0=sine, 1=warp, 2=sink */
-
-    /* Performance shortcuts. */
-    int   decay_infinite;      /* when 1, fb_target → 1.0 */
-    float fb_decay_setting;    /* preserves the decay-knob feedback for restore */
 };
 
 #define R_SMOOTH_COEF 0.9989f  /* ~20 ms time constant @ 44.1 kHz */
@@ -119,8 +115,6 @@ reverb_t* reverb_create(void) {
     r->mod_depth_target = 0.0f;
     r->mod_depth_current = 0.0f;
     r->mod_shape = 0;
-    r->decay_infinite = 0;
-    r->fb_decay_setting = r->fb_target;
     for (int i = 0; i < R_COMB; i++) {
         lfo_init(&r->lfo[i], R_SAMPLE_RATE);
         lfo_set_phase(&r->lfo[i], R_COMB_PHASE[i]);
@@ -141,15 +135,7 @@ void reverb_set_decay(reverb_t *r, float decay_0_1) {
     if (decay_0_1 < 0.0f) decay_0_1 = 0.0f;
     if (decay_0_1 > 1.0f) decay_0_1 = 1.0f;
     float curve = powf(decay_0_1, 0.4f);
-    r->fb_decay_setting = 0.50f + 0.49f * curve;
-    /* If ∞ Decay shortcut is on, leave fb_target at 1.0; otherwise apply. */
-    if (!r->decay_infinite) r->fb_target = r->fb_decay_setting;
-}
-
-void reverb_set_decay_infinite(reverb_t *r, int infinite) {
-    if (!r) return;
-    r->decay_infinite = infinite ? 1 : 0;
-    r->fb_target = r->decay_infinite ? 1.0f : r->fb_decay_setting;
+    r->fb_target = 0.50f + 0.49f * curve;
 }
 
 void reverb_set_mod_depth(reverb_t *r, float depth_0_1) {
