@@ -40,8 +40,8 @@ static const amb_preset_t AMB_PRESETS[AMB_MODE_COUNT] = {
     { .mix = 0.50f, .loop_layer = 0.95f, .grain_size = 0.90f, .scatter = 0.05f,
       .micro_hold = 0.10f, .decay = 0.15f, .mod_depth = 0.15f, .mod_rate = 0.20f },
     /* Mismember — chaotic glitch / pointillistic texture. */
-    { .mix = 0.50f, .loop_layer = 0.40f, .grain_size = 0.25f, .scatter = 0.80f,
-      .micro_hold = 0.20f, .decay = 0.50f, .mod_depth = 0.50f, .mod_rate = 0.60f },
+    { .mix = 0.50f, .loop_layer = 0.87f, .grain_size = 0.25f, .scatter = 0.80f,
+      .micro_hold = 0.27f, .decay = 0.50f, .mod_depth = 0.50f, .mod_rate = 0.60f },
     /* NAPS — frozen-breath sound under lush tail. */
     { .mix = 0.50f, .loop_layer = 0.20f, .grain_size = 0.80f, .scatter = 0.20f,
       .micro_hold = 0.65f, .decay = 0.80f, .mod_depth = 0.25f, .mod_rate = 0.15f },
