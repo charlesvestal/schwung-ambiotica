@@ -88,6 +88,11 @@ typedef struct {
     int      tick_count;           /* ticks accumulated since anchor */
     int      ticks_per_loop;       /* cached: bars × 4 × 24 */
     int      clock_anchored;       /* 1 once we have a valid anchor */
+    uint64_t total_ticks;          /* lifetime tick count — debug/verify clock receipt */
+
+    /* BPM-poll fallback (when MIDI clock isn't reaching us). Re-derive
+     * loop_len from host get_bpm() at every loop wraparound. */
+    uint64_t last_bpm_poll_sample; /* sample at last poll */
 
     /* Smoothed final-mix value. plugin.c blends dry vs wet bus per sample
      * using mix_current ramping toward inst->mix so knob changes don't click. */
@@ -211,6 +216,8 @@ static void* amb_create(const char *module_dir, const char *config_json) {
     inst->tick_count = 0;
     inst->ticks_per_loop = 0;
     inst->clock_anchored = 0;
+    inst->total_ticks = 0;
+    inst->last_bpm_poll_sample = 0;
 
     /* Allocate looper buffer for the WORST-case loop length so we can
      * resize the active loop_len later without realloc. 8 bars @ 60 BPM. */
@@ -293,6 +300,26 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
 
     /* Advance sample counter for MIDI clock follower. */
     inst->sample_counter += (uint64_t)frames;
+
+    /* BPM-poll fallback: if no MIDI clock ticks have arrived since last
+     * loop's worth of samples, re-derive loop_len from host BPM. Crossfade
+     * handles the transition. */
+    if (!inst->clock_anchored && inst->looper && g_host && g_host->get_bpm) {
+        float bars = inst->loop_length_bars;
+        float bpm = g_host->get_bpm();
+        if (bpm > 0.0f && bars > 0.0f) {
+            uint64_t expected_loop_samples =
+                (uint64_t)(bars * (float)AMB_BEATS_PER_BAR * 60.0f / bpm * (float)AMB_SAMPLE_RATE);
+            if (expected_loop_samples > 0 &&
+                inst->sample_counter - inst->last_bpm_poll_sample >= expected_loop_samples) {
+                int samples = (int)expected_loop_samples;
+                if (samples > 0 && samples < AMB_LOOP_BUF_MAX_SECONDS * AMB_SAMPLE_RATE) {
+                    looper_set_loop_len(inst->looper, samples);
+                }
+                inst->last_bpm_poll_sample = inst->sample_counter;
+            }
+        }
+    }
 
     /* Stage 1: Looper. Captures dry, outputs only the loop signal. */
     looper_process(inst->looper, dry_l, dry_r, loop_l, loop_r, frames);
@@ -510,6 +537,8 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
         n = snprintf(buf, buf_len, "%s", AMB_MODE_NAMES[inst->mode]);
     else if (strcmp(key, "loop_length") == 0)
         n = snprintf(buf, buf_len, "%.1f", inst->loop_length_bars);
+    else if (strcmp(key, "midi_clock_ticks") == 0)
+        n = snprintf(buf, buf_len, "%llu", (unsigned long long)inst->total_ticks);
     else if (strcmp(key, "state") == 0) {
         n = snprintf(buf, buf_len,
             "{\"mode\":%d,"
@@ -604,6 +633,7 @@ static void amb_on_midi(void *vp, const uint8_t *msg, int len, int source) {
     /* MIDI Clock pulse (0xF8). 24 PPQ — N ticks per loop where
      * N = bars × beats/bar × PPQ. */
     if (status != 0xF8) return;
+    inst->total_ticks++;
     if (inst->ticks_per_loop <= 0) return;
 
     if (!inst->clock_anchored) {
