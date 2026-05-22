@@ -88,6 +88,8 @@ static void* amb_create(const char *module_dir, const char *config_json) {
     inst->reverb = reverb_create();
     if (!inst->reverb) { free(inst); return NULL; }
     reverb_set_decay(inst->reverb, inst->decay);
+    reverb_set_mod_depth(inst->reverb, inst->mod_depth);
+    reverb_set_mod_rate(inst->reverb, inst->mod_rate);
     return inst;
 }
 
@@ -140,8 +142,8 @@ static void amb_set_state(amb_instance_t *inst, const char *val) {
     if (json_get_float(val, "scatter",     &f) == 0) inst->scatter = f;
     if (json_get_float(val, "micro_hold",  &f) == 0) inst->micro_hold = f;
     if (json_get_float(val, "decay",       &f) == 0) { inst->decay = f; reverb_set_decay(inst->reverb, f); }
-    if (json_get_float(val, "mod_depth",   &f) == 0) inst->mod_depth = f;
-    if (json_get_float(val, "mod_rate",    &f) == 0) inst->mod_rate = f;
+    if (json_get_float(val, "mod_depth",   &f) == 0) { inst->mod_depth = f; reverb_set_mod_depth(inst->reverb, f); }
+    if (json_get_float(val, "mod_rate",    &f) == 0) { inst->mod_rate = f; reverb_set_mod_rate(inst->reverb, f); }
     if (json_get_int  (val, "mix_kill_dry",   &i) == 0) inst->mix_kill_dry   = i ? 1 : 0;
     if (json_get_int  (val, "grain_glitchy",  &i) == 0) inst->grain_glitchy  = i ? 1 : 0;
     if (json_get_int  (val, "micro_freeze",   &i) == 0) inst->micro_freeze   = i ? 1 : 0;
@@ -167,8 +169,16 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
         reverb_set_decay(inst->reverb, inst->decay);
         return;
     }
-    if (strcmp(key, "mod_depth") == 0)     { inst->mod_depth = (float)atof(val); return; }
-    if (strcmp(key, "mod_rate") == 0)      { inst->mod_rate = (float)atof(val); return; }
+    if (strcmp(key, "mod_depth") == 0)     {
+        inst->mod_depth = (float)atof(val);
+        reverb_set_mod_depth(inst->reverb, inst->mod_depth);
+        return;
+    }
+    if (strcmp(key, "mod_rate") == 0)      {
+        inst->mod_rate = (float)atof(val);
+        reverb_set_mod_rate(inst->reverb, inst->mod_rate);
+        return;
+    }
     if (strcmp(key, "mix_kill_dry") == 0)   { inst->mix_kill_dry   = atoi(val) ? 1 : 0; return; }
     if (strcmp(key, "grain_glitchy") == 0)  { inst->grain_glitchy  = atoi(val) ? 1 : 0; return; }
     if (strcmp(key, "micro_freeze") == 0)   { inst->micro_freeze   = atoi(val) ? 1 : 0; return; }
