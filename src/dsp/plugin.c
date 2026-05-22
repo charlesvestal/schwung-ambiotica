@@ -10,8 +10,11 @@
 #include "microloop.h"
 #include "reverb.h"
 
-#define AMB_SAMPLE_RATE 44100
-#define AMB_LOOPER_SECONDS 6
+#define AMB_SAMPLE_RATE       44100
+#define AMB_LOOP_BARS         1.5f    /* polyrhythmic — never lines up with bar grid */
+#define AMB_BEATS_PER_BAR     4
+#define AMB_MAX_LOOP_SECONDS  16      /* hard cap so very slow tempos don't blow buffer */
+#define AMB_DEFAULT_BPM       120.0f  /* fallback if host doesn't expose tempo */
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -127,7 +130,20 @@ static void* amb_create(const char *module_dir, const char *config_json) {
     inst->mode = 0;
     inst->mix_current = inst->mix;
 
-    inst->looper = looper_create(AMB_LOOPER_SECONDS * AMB_SAMPLE_RATE);
+    /* Tempo-aware loop length. Query host BPM (with safe default fallback)
+     * and size buffer to AMB_LOOP_BARS bars at that tempo. Captured once at
+     * create_instance — host re-load to follow large tempo changes. */
+    float bpm = AMB_DEFAULT_BPM;
+    if (g_host && g_host->get_bpm) {
+        float b = g_host->get_bpm();
+        if (b > 0.0f) bpm = b;
+    }
+    float loop_seconds = AMB_LOOP_BARS * (float)AMB_BEATS_PER_BAR * 60.0f / bpm;
+    if (loop_seconds < 0.5f) loop_seconds = 0.5f;
+    if (loop_seconds > (float)AMB_MAX_LOOP_SECONDS) loop_seconds = (float)AMB_MAX_LOOP_SECONDS;
+    int loop_samples = (int)(loop_seconds * (float)AMB_SAMPLE_RATE);
+
+    inst->looper = looper_create(loop_samples);
     if (!inst->looper) { free(inst); return NULL; }
     looper_set_layer(inst->looper, inst->loop_layer);
 
