@@ -302,3 +302,29 @@ or limit reverb diffusion order. **Don't optimize earlier — measure first.**
 
 A tiny `tests/run_wav.cpp` that pipes a WAV through the engine for offline ear-testing.
 Saves device round-trips during phases 2–6. Mirrors the pattern from prior DSP ports.
+
+## Slö character backlog (post-phase-10)
+
+Slö's three voices are Dark / Rise / Dream. Our Flow mode targets Dream
+(modulated lush reverb + freeze, landing across phases 3/6/8). The other two
+voices aren't in the current 10-phase scope but are worth considering once the
+core chain is shipping:
+
+- **Dark-style shimmer** — sub-octave or +1-oct injection into the reverb input.
+  Implementation candidate: a tap that pitches the granular-stage output by ±12 semitones
+  before it enters the reverb. Could be a mode-specific feature for Flow or a new
+  alt-state on the Decay knob (e.g. triple-tap?). Adds harmonic depth that pure
+  modulation can't.
+- **Rise-style auto-swell** — envelope-follower on the wet bus that ramps up the
+  wet level on new note attacks, then decays. Slö's Rise voice has this and it's a
+  big part of why it sounds cinematic. Implementation: simple AR envelope keyed
+  off input level threshold. Could live behind a Mod Depth alt-state.
+- **Stretch / lo-fi tail** — Slöer's "Stretch" control runs the reverb at a
+  reduced sample rate, time-stretching the algorithm and adding bitcrush
+  artifacts. Implementation: internal downsampler around the reverb stage. Could
+  be a future alt-state on Decay (e.g. doubletap Decay already does ∞-decay;
+  a triple-tap or a separate "character" knob in a deeper menu).
+
+None of these are blocking for v0.1.0 — Ambiotica's identity is the chain
+(looper → granular → micro-loop → reverb), not Slö emulation. But each adds
+character that pure modulation can't reach.
