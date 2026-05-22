@@ -1,6 +1,6 @@
 /* Ambiotica reverb — 4-delay Hadamard FDN with pre-diffusion.
  *
- * Slö-spirited lush algorithmic reverb. Stage 4 of the Ambiotica chain.
+ * Lush algorithmic reverb. Stage 4 of the Ambiotica chain.
  * Phase 2: just the reverb. LFO modulation arrives in phase 3 via
  * reverb_set_mod() (not exposed yet).
  *
@@ -34,7 +34,7 @@ void      reverb_set_mod_shape(reverb_t *r, int shape);
 
 /* Stretch: when on, comb network runs at half sample rate (every other
  * sample is zero-order-held). Doubles effective delays + adds high-freq
- * aliasing — Slöer "Stretch" lo-fi character. */
+ * aliasing — produces a lo-fi, time-stretched tail character. */
 void      reverb_set_stretch(reverb_t *r, int on);
 
 /* Process stereo float buffers. in and out may NOT alias (in is read first

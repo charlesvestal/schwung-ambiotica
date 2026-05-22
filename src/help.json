@@ -10,7 +10,7 @@
         "modulated reverb.",
         "",
         "Four mode presets",
-        "(Loona, Mismember,",
+        "(Mismember, Loona,",
         "NAPS, Flow) reset",
         "the 8 knobs to a",
         "character starting",
@@ -19,49 +19,64 @@
     },
     {
       "title": "Knobs",
-      "children": [
-        {
-          "title": "Knob Mapping",
-          "lines": [
-            "1 Mix",
-            "2 Loop Layer",
-            "3 Grain Size",
-            "4 Scatter",
-            "5 Micro Hold",
-            "6 Decay",
-            "7 Mod Depth",
-            "8 Mod Rate"
-          ]
-        },
-        {
-          "title": "Double-tap",
-          "lines": [
-            "Mix: Kill Dry",
-            "Loop Layer: Clear",
-            "Grain Size: Glitch",
-            "Scatter: Re-seed",
-            "Micro Hold: Hold",
-            "Decay: Self-osc",
-            "Mod Depth: Sync",
-            "Mod Rate: Shape"
-          ]
-        }
+      "lines": [
+        "1 Mix",
+        "2 Loop Layer",
+        "3 Grain Size",
+        "4 Scatter",
+        "5 Micro Hold",
+        "6 Decay",
+        "7 Mod Depth",
+        "8 Mod Rate"
       ]
     },
     {
       "title": "Modes",
       "lines": [
-        "Loona: rolling",
-        " capture loops",
-        "",
         "Mismember: glitch",
         " grain textures",
+        "",
+        "Loona: rolling",
+        " capture loops",
         "",
         "NAPS: frozen breath",
         " under lush tail",
         "",
         "Flow: pure modulated",
         " reverb (no capture)"
+      ]
+    },
+    {
+      "title": "Settings menu",
+      "lines": [
+        "Loop Length: bars",
+        " (0.5 - 8.0)",
+        "",
+        "Mod Shape: Sine,",
+        " Warp, Sink",
+        "",
+        "Tempo Sync: lock",
+        " mod rate to BPM",
+        "",
+        "Lo-Fi Tails: half",
+        " rate reverb,",
+        " bitcrush character"
+      ]
+    },
+    {
+      "title": "Tips",
+      "lines": [
+        "Loop Length is",
+        "tempo-aware - 1.5",
+        "bars by default.",
+        "",
+        "Mod Depth bends",
+        "both reverb and",
+        "grain pitch.",
+        "",
+        "Micro Hold at max",
+        "(>=95%) auto-",
+        "freezes the layer."
       ]
     }
   ]
