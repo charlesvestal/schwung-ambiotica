@@ -11,10 +11,12 @@
 #include "reverb.h"
 
 #define AMB_SAMPLE_RATE       44100
-#define AMB_LOOP_BARS         1.5f    /* polyrhythmic — never lines up with bar grid */
 #define AMB_BEATS_PER_BAR     4
-#define AMB_MAX_LOOP_SECONDS  16      /* hard cap so very slow tempos don't blow buffer */
 #define AMB_DEFAULT_BPM       120.0f  /* fallback if host doesn't expose tempo */
+#define AMB_LOOP_BARS_DEFAULT 1.5f    /* polyrhythmic — never lines up with bar grid */
+#define AMB_LOOP_BARS_MIN     0.5f
+#define AMB_LOOP_BARS_MAX     8.0f
+#define AMB_LOOP_BUF_MAX_SECONDS 32   /* 8 bars at 60 BPM = max allocation needed */
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -72,6 +74,9 @@ typedef struct {
 
     int   mode;
 
+    /* Setting (not part of mode presets) — loop length in bars (0.5..8.0). */
+    float loop_length_bars;
+
     /* Smoothed final-mix value. plugin.c blends dry vs wet bus per sample
      * using mix_current ramping toward inst->mix so knob changes don't click. */
     float mix_current;
@@ -85,6 +90,25 @@ typedef struct {
     /* Stage 4 — reverb. */
     reverb_t *reverb;
 } amb_instance_t;
+
+/* Forward declaration — applies the current bars setting + BPM to looper. */
+static void amb_apply_loop_length(amb_instance_t *inst);
+
+/* Apply loop_length_bars × current BPM to looper's active loop length. */
+static void amb_apply_loop_length(amb_instance_t *inst) {
+    if (!inst || !inst->looper) return;
+    float bars = inst->loop_length_bars;
+    if (bars < AMB_LOOP_BARS_MIN) bars = AMB_LOOP_BARS_MIN;
+    if (bars > AMB_LOOP_BARS_MAX) bars = AMB_LOOP_BARS_MAX;
+    float bpm = AMB_DEFAULT_BPM;
+    if (g_host && g_host->get_bpm) {
+        float b = g_host->get_bpm();
+        if (b > 0.0f) bpm = b;
+    }
+    float loop_seconds = bars * (float)AMB_BEATS_PER_BAR * 60.0f / bpm;
+    int samples = (int)(loop_seconds * (float)AMB_SAMPLE_RATE);
+    looper_set_loop_len(inst->looper, samples);
+}
 
 /* --- Minimal JSON readers (same pattern as schwung-midiverb plugin.c) --- */
 
@@ -130,22 +154,15 @@ static void* amb_create(const char *module_dir, const char *config_json) {
     inst->mode = 0;
     inst->mix_current = inst->mix;
 
-    /* Tempo-aware loop length. Query host BPM (with safe default fallback)
-     * and size buffer to AMB_LOOP_BARS bars at that tempo. Captured once at
-     * create_instance — host re-load to follow large tempo changes. */
-    float bpm = AMB_DEFAULT_BPM;
-    if (g_host && g_host->get_bpm) {
-        float b = g_host->get_bpm();
-        if (b > 0.0f) bpm = b;
-    }
-    float loop_seconds = AMB_LOOP_BARS * (float)AMB_BEATS_PER_BAR * 60.0f / bpm;
-    if (loop_seconds < 0.5f) loop_seconds = 0.5f;
-    if (loop_seconds > (float)AMB_MAX_LOOP_SECONDS) loop_seconds = (float)AMB_MAX_LOOP_SECONDS;
-    int loop_samples = (int)(loop_seconds * (float)AMB_SAMPLE_RATE);
-
-    inst->looper = looper_create(loop_samples);
+    /* Allocate looper buffer for the WORST-case loop length so we can
+     * resize the active loop_len later without realloc. 8 bars @ 60 BPM. */
+    inst->looper = looper_create(AMB_LOOP_BUF_MAX_SECONDS * AMB_SAMPLE_RATE);
     if (!inst->looper) { free(inst); return NULL; }
     looper_set_layer(inst->looper, inst->loop_layer);
+
+    /* Tempo-aware initial loop length using the default bar count. */
+    inst->loop_length_bars = AMB_LOOP_BARS_DEFAULT;
+    amb_apply_loop_length(inst);
 
     inst->granular = granular_create();
     if (!inst->granular) { looper_destroy(inst->looper); free(inst); return NULL; }
@@ -296,6 +313,12 @@ static void amb_set_state(amb_instance_t *inst, const char *val) {
         inst->mod_shape = (i < 0 ? 0 : (i > 2 ? 2 : i));
     if (json_get_int  (val, "mode",           &i) == 0)
         inst->mode = (i < 0 ? 0 : (i >= AMB_MODE_COUNT ? AMB_MODE_COUNT - 1 : i));
+    if (json_get_float(val, "loop_length",    &f) == 0) {
+        if (f < AMB_LOOP_BARS_MIN) f = AMB_LOOP_BARS_MIN;
+        if (f > AMB_LOOP_BARS_MAX) f = AMB_LOOP_BARS_MAX;
+        inst->loop_length_bars = f;
+        amb_apply_loop_length(inst);
+    }
 }
 
 static void amb_set_param(void *vp, const char *key, const char *val) {
@@ -312,6 +335,15 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
         /* One-shot: any truthy value clears the loop buffer. Wired to the
          * Loop Layer knob's double-tap by phase 8. */
         if (atoi(val) != 0) looper_clear(inst->looper);
+        return;
+    }
+    if (strcmp(key, "loop_length") == 0) {
+        /* Bars, 0.5..8.0 step 0.5. Triggers a recompute of looper.loop_len. */
+        float bars = (float)atof(val);
+        if (bars < AMB_LOOP_BARS_MIN) bars = AMB_LOOP_BARS_MIN;
+        if (bars > AMB_LOOP_BARS_MAX) bars = AMB_LOOP_BARS_MAX;
+        inst->loop_length_bars = bars;
+        amb_apply_loop_length(inst);
         return;
     }
     if (strcmp(key, "grain_size") == 0)    {
@@ -412,18 +444,22 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
     else if (strcmp(key, "mode_count") == 0)  n = snprintf(buf, buf_len, "%d", AMB_MODE_COUNT);
     else if (strcmp(key, "mode_name") == 0)
         n = snprintf(buf, buf_len, "%s", AMB_MODE_NAMES[inst->mode]);
+    else if (strcmp(key, "loop_length") == 0)
+        n = snprintf(buf, buf_len, "%.1f", inst->loop_length_bars);
     else if (strcmp(key, "state") == 0) {
         n = snprintf(buf, buf_len,
             "{\"mode\":%d,"
             "\"mix\":%.4f,\"loop_layer\":%.4f,\"grain_size\":%.4f,\"scatter\":%.4f,"
             "\"micro_hold\":%.4f,\"decay\":%.4f,\"mod_depth\":%.4f,\"mod_rate\":%.4f,"
             "\"mix_kill_dry\":%d,\"grain_glitchy\":%d,\"micro_freeze\":%d,"
-            "\"decay_infinite\":%d,\"mod_sync\":%d,\"mod_shape\":%d}",
+            "\"decay_infinite\":%d,\"mod_sync\":%d,\"mod_shape\":%d,"
+            "\"loop_length\":%.2f}",
             inst->mode,
             inst->mix, inst->loop_layer, inst->grain_size, inst->scatter,
             inst->micro_hold, inst->decay, inst->mod_depth, inst->mod_rate,
             inst->mix_kill_dry, inst->grain_glitchy, inst->micro_freeze,
-            inst->decay_infinite, inst->mod_sync, inst->mod_shape);
+            inst->decay_infinite, inst->mod_sync, inst->mod_shape,
+            inst->loop_length_bars);
     }
     else if (strcmp(key, "chain_params") == 0) {
         n = snprintf(buf, buf_len,
@@ -442,7 +478,8 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
             "{\"key\":\"micro_freeze\",\"name\":\"Infinite Hold\",\"type\":\"int\",\"min\":0,\"max\":1},"
             "{\"key\":\"decay_infinite\",\"name\":\"Infinite Decay\",\"type\":\"int\",\"min\":0,\"max\":1},"
             "{\"key\":\"mod_sync\",\"name\":\"Tempo Sync\",\"type\":\"int\",\"min\":0,\"max\":1},"
-            "{\"key\":\"mod_shape\",\"name\":\"Mod Shape\",\"type\":\"enum\",\"options\":[\"Sine\",\"Warp\",\"Sink\"]}"
+            "{\"key\":\"mod_shape\",\"name\":\"Mod Shape\",\"type\":\"enum\",\"options\":[\"Sine\",\"Warp\",\"Sink\"]},"
+            "{\"key\":\"loop_length\",\"name\":\"Loop Length\",\"type\":\"float\",\"min\":0.5,\"max\":8,\"step\":0.5,\"unit\":\"bars\"}"
             "]");
     }
     else if (strcmp(key, "ui_hierarchy") == 0) {
@@ -466,7 +503,8 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
                     "{\"key\":\"decay\",\"label\":\"Decay\"},"
                     "{\"key\":\"mod_depth\",\"label\":\"Mod Depth\"},"
                     "{\"key\":\"mod_rate\",\"label\":\"Mod Rate\"},"
-                    "{\"level\":\"alt\",\"label\":\"Alt States\"}"
+                    "{\"level\":\"alt\",\"label\":\"Alt States\"},"
+                    "{\"level\":\"settings\",\"label\":\"Settings\"}"
                   "]"
                 "},"
                 "\"alt\":{"
@@ -479,6 +517,13 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
                     "{\"key\":\"decay_infinite\",\"label\":\"Infinite Decay\"},"
                     "{\"key\":\"mod_sync\",\"label\":\"Tempo Sync\"},"
                     "{\"key\":\"mod_shape\",\"label\":\"Mod Shape\"}"
+                  "]"
+                "},"
+                "\"settings\":{"
+                  "\"label\":\"Settings\","
+                  "\"knobs\":[],"
+                  "\"params\":["
+                    "{\"key\":\"loop_length\",\"label\":\"Loop Length\"}"
                   "]"
                 "}"
               "}"

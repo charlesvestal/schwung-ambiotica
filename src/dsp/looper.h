@@ -13,12 +13,14 @@
 
 typedef struct looper_s looper_t;
 
-/* Create with buffer length in samples (e.g. 30 * 44100 for 30 s @ 44.1 kHz).
+/* Create with maximum buffer capacity in samples. The active loop length
+ * defaults to this capacity and can be reduced via looper_set_loop_len.
  * Returns NULL on allocation failure. */
-looper_t* looper_create(int buf_len_samples);
+looper_t* looper_create(int buf_capacity_samples);
 void      looper_destroy(looper_t *l);
 
 /* layer_0_1: 0 = no loop (transparent), 1 = ~unity feedback (long-tailed). */
+void      looper_set_loop_len(looper_t *l, int loop_len_samples);
 void      looper_set_layer(looper_t *l, float layer_0_1);
 
 /* One-shot: zero the entire buffer. Safe to call from set_param. */
