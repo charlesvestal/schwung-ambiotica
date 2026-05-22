@@ -9,8 +9,13 @@ struct looper_s {
     float *buf_R;
     int    buf_len;
     int    write_pos;
-    float  feedback_gain;   /* 0..0.95, set by looper_set_layer */
+    /* Smoothed feedback — abrupt knob changes would otherwise inject a
+     * step into the buffer and echo forever. */
+    float  fb_target;
+    float  fb_current;
 };
+
+#define LOOPER_SMOOTH_COEF 0.9989f  /* ~20 ms time constant @ 44.1 kHz */
 
 looper_t* looper_create(int buf_len_samples) {
     if (buf_len_samples <= 0) return NULL;
@@ -37,7 +42,7 @@ void looper_set_layer(looper_t *l, float layer_0_1) {
     /* knob^2 curve so the bottom half is much quieter (perceptually useful
      * range) and only the top quarter gets into "lush layered loop" territory.
      * Cap at 0.95 prevents uncontrolled growth on sustained input. */
-    l->feedback_gain = layer_0_1 * layer_0_1 * 0.95f;
+    l->fb_target = layer_0_1 * layer_0_1 * 0.95f;
 }
 
 void looper_clear(looper_t *l) {
@@ -51,11 +56,17 @@ void looper_process(looper_t *l,
                     float *out_l, float *out_r,
                     int frames) {
     if (!l || frames <= 0) return;
-    const float fb = l->feedback_gain;
     int pos = l->write_pos;
     const int len = l->buf_len;
 
+    float fb_curr      = l->fb_current;
+    const float fb_t   = l->fb_target;
+    const float c      = LOOPER_SMOOTH_COEF;
+    const float ic     = 1.0f - c;
+
     for (int n = 0; n < frames; n++) {
+        fb_curr = c * fb_curr + ic * fb_t;
+
         /* Read the sample that's about to be overwritten — this is the
          * oldest sample in the buffer, exactly buf_len samples old. */
         float loopL = l->buf_L[pos];
@@ -63,20 +74,19 @@ void looper_process(looper_t *l,
 
         /* Write input + feedback back into the buffer. Soft-clip so the
          * loop can't blow up under sustained input + near-unity feedback. */
-        float newL = in_l[n] + fb * loopL;
-        float newR = in_r[n] + fb * loopR;
+        float newL = in_l[n] + fb_curr * loopL;
+        float newR = in_r[n] + fb_curr * loopR;
         if (newL >  1.0f) newL =  1.0f; else if (newL < -1.0f) newL = -1.0f;
         if (newR >  1.0f) newR =  1.0f; else if (newR < -1.0f) newR = -1.0f;
         l->buf_L[pos] = newL;
         l->buf_R[pos] = newR;
 
-        /* Output: ONLY the loop signal (no dry). Caller mixes dry separately
-         * so subsequent stages can grain/transform the loop without touching
-         * the live signal. */
-        out_l[n] = fb * loopL;
-        out_r[n] = fb * loopR;
+        /* Output: ONLY the loop signal (no dry). Caller mixes dry separately. */
+        out_l[n] = fb_curr * loopL;
+        out_r[n] = fb_curr * loopR;
 
         pos++; if (pos >= len) pos = 0;
     }
     l->write_pos = pos;
+    l->fb_current = fb_curr;
 }

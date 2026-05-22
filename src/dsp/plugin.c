@@ -96,6 +96,7 @@ static void* amb_create(const char *module_dir, const char *config_json) {
     inst->mod_depth = 0.15f;
     inst->mod_rate = 0.20f;
     inst->mode = 0;
+    inst->mix_current = inst->mix;
 
     inst->looper = looper_create(AMB_LOOPER_SECONDS * AMB_SAMPLE_RATE);
     if (!inst->looper) { free(inst); return NULL; }
@@ -208,19 +209,25 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
     /* Stage 4: Reverb. */
     reverb_process(inst->reverb, rev_in_l, rev_in_r, wet_l, wet_r, frames);
 
-    /* Final mix: wet bus = layered + micro + reverb tail. */
-    const float mix = inst->mix;
-    const float dry_g = 1.0f - mix;
+    /* Final mix: wet bus = layered + micro + reverb tail.
+     * Smooth the Mix knob per-sample so abrupt knob changes don't click. */
+    const float mix_target = inst->mix;
+    float mix_curr = inst->mix_current;
+    const float c = 0.9989f;  /* ~20 ms time constant */
+    const float ic = 1.0f - c;
     for (int i = 0; i < frames; i++) {
+        mix_curr = c * mix_curr + ic * mix_target;
+        float dry_g = 1.0f - mix_curr;
         float wet_bus_l = layered_l[i] + micro_l[i] + wet_l[i];
         float wet_bus_r = layered_r[i] + micro_r[i] + wet_r[i];
-        float l = dry_g * dry_l[i] + mix * wet_bus_l;
-        float r = dry_g * dry_r[i] + mix * wet_bus_r;
+        float l = dry_g * dry_l[i] + mix_curr * wet_bus_l;
+        float r = dry_g * dry_r[i] + mix_curr * wet_bus_r;
         if (l >  1.0f) l =  1.0f; else if (l < -1.0f) l = -1.0f;
         if (r >  1.0f) r =  1.0f; else if (r < -1.0f) r = -1.0f;
         audio_inout[2*i + 0] = (int16_t)(l * 32767.0f);
         audio_inout[2*i + 1] = (int16_t)(r * 32767.0f);
     }
+    inst->mix_current = mix_curr;
 }
 
 /* --- set_param --- */

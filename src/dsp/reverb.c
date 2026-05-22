@@ -69,7 +69,7 @@ struct reverb_s {
     int    ap_pos_R[R_AP];
 
     /* Tunables */
-    float fb;
+    float fb_target,           fb_current;
     float damp_a;
     float ap_g;
     float input_gain;
@@ -78,8 +78,10 @@ struct reverb_s {
     /* Modulation — one LFO per comb, each at its own rate. */
     lfo_t lfo[R_COMB];
     float base_rate_hz;       /* user-set rate before per-comb multiplication */
-    float mod_depth_samples;  /* 0..R_MOD_HEADROOM/2 */
+    float mod_depth_target,    mod_depth_current;  /* 0..R_MOD_HEADROOM/2 */
 };
+
+#define R_SMOOTH_COEF 0.9989f  /* ~20 ms time constant @ 44.1 kHz */
 
 reverb_t* reverb_create(void) {
     reverb_t *r = (reverb_t*)calloc(1, sizeof(reverb_t));
@@ -102,13 +104,15 @@ reverb_t* reverb_create(void) {
         r->ap_buf_R[i] = (float*)calloc((size_t)Rlen, sizeof(float));
         if (!r->ap_buf_L[i] || !r->ap_buf_R[i]) { reverb_destroy(r); return NULL; }
     }
-    r->fb = 0.78f;
+    r->fb_target = 0.78f;
+    r->fb_current = 0.78f;
     r->damp_a = 0.55f;
     r->ap_g = 0.70f;
     r->input_gain = 0.40f;
     r->wet_gain = 0.18f;
     r->base_rate_hz = 0.3f;
-    r->mod_depth_samples = 0.0f;
+    r->mod_depth_target = 0.0f;
+    r->mod_depth_current = 0.0f;
     for (int i = 0; i < R_COMB; i++) {
         lfo_init(&r->lfo[i], R_SAMPLE_RATE);
         lfo_set_phase(&r->lfo[i], R_COMB_PHASE[i]);
@@ -129,7 +133,7 @@ void reverb_set_decay(reverb_t *r, float decay_0_1) {
     if (decay_0_1 < 0.0f) decay_0_1 = 0.0f;
     if (decay_0_1 > 1.0f) decay_0_1 = 1.0f;
     float curve = powf(decay_0_1, 0.4f);
-    r->fb = 0.50f + 0.49f * curve;
+    r->fb_target = 0.50f + 0.49f * curve;
 }
 
 void reverb_set_mod_depth(reverb_t *r, float depth_0_1) {
@@ -142,7 +146,7 @@ void reverb_set_mod_depth(reverb_t *r, float depth_0_1) {
      * cents of detune per comb — perceived as movement, not pitch.
      * Concave curve puts more useful travel in the low/mid knob range. */
     float curve = powf(depth_0_1, 0.7f);
-    r->mod_depth_samples = curve * 45.0f;
+    r->mod_depth_target = curve * 45.0f;
 }
 
 void reverb_set_mod_rate(reverb_t *r, float rate_0_1) {
@@ -184,22 +188,32 @@ void reverb_process(reverb_t *r,
                     int frames) {
     if (!r || frames <= 0) return;
 
-    const float fb     = r->fb;
     const float damp_a = r->damp_a;
     const float damp_b = 1.0f - damp_a;
     const float ap_g   = r->ap_g;
     const float in_g   = r->input_gain;
     const float out_g  = r->wet_gain;
-    const float mod_d  = r->mod_depth_samples;
+
+    /* Smoothed feedback + mod depth — both feed delay buffers, so abrupt
+     * changes would echo forever in the reverb tail. */
+    float fb_curr    = r->fb_current;
+    float mod_curr   = r->mod_depth_current;
+    const float fb_t   = r->fb_target;
+    const float mod_t  = r->mod_depth_target;
+    const float c      = R_SMOOTH_COEF;
+    const float ic     = 1.0f - c;
 
     for (int n = 0; n < frames; n++) {
+        fb_curr  = c * fb_curr  + ic * fb_t;
+        mod_curr = c * mod_curr + ic * mod_t;
+
         float xL = in_l[n] * in_g;
         float xR = in_r[n] * in_g;
 
         float sumL = 0.0f, sumR = 0.0f;
         for (int i = 0; i < R_COMB; i++) {
             /* Each comb advances its own LFO at its own rate. */
-            float mod = lfo_tick_sine(&r->lfo[i]) * mod_d;
+            float mod = lfo_tick_sine(&r->lfo[i]) * mod_curr;
 
             /* L comb */
             float dL = (float)R_COMB_BASE[i] + mod;
@@ -208,7 +222,7 @@ void reverb_process(reverb_t *r,
                                         r->comb_write_L[i], dL);
             float fL = damp_b * yL + damp_a * r->comb_damp_L[i];
             r->comb_damp_L[i] = fL;
-            r->comb_buf_L[i][r->comb_write_L[i]] = xL + fb * fL;
+            r->comb_buf_L[i][r->comb_write_L[i]] = xL + fb_curr * fL;
             r->comb_write_L[i]++;
             if (r->comb_write_L[i] >= r->comb_buf_len_L[i]) r->comb_write_L[i] = 0;
             sumL += yL;
@@ -220,7 +234,7 @@ void reverb_process(reverb_t *r,
                                         r->comb_write_R[i], dR);
             float fR = damp_b * yR + damp_a * r->comb_damp_R[i];
             r->comb_damp_R[i] = fR;
-            r->comb_buf_R[i][r->comb_write_R[i]] = xR + fb * fR;
+            r->comb_buf_R[i][r->comb_write_R[i]] = xR + fb_curr * fR;
             r->comb_write_R[i]++;
             if (r->comb_write_R[i] >= r->comb_buf_len_R[i]) r->comb_write_R[i] = 0;
             sumR += yR;
@@ -237,4 +251,7 @@ void reverb_process(reverb_t *r,
         out_l[n] = oL * out_g;
         out_r[n] = oR * out_g;
     }
+
+    r->fb_current = fb_curr;
+    r->mod_depth_current = mod_curr;
 }
