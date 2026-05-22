@@ -74,6 +74,11 @@ typedef struct {
     /* Setting (not part of mode presets) — loop length in bars (0.5..8.0). */
     float loop_length_bars;
 
+    /* Layer levels — multiply granular/micro contributions before they
+     * enter the wet bus + reverb input. Default 1.0 = unchanged. */
+    float gran_level;
+    float micro_level;
+
     /* Lo-fi tails — reverb runs at half rate for time-stretched bitcrush. */
     int   lofi_tails_on;
 
@@ -191,6 +196,8 @@ static void* amb_create(const char *module_dir, const char *config_json) {
     inst->mix_current = inst->mix;
     inst->lofi_tails_on = 0;
     inst->last_bpm = 0.0f;
+    inst->gran_level = 1.0f;
+    inst->micro_level = 1.0f;
 
     /* Allocate looper buffer for the WORST-case loop length so we can
      * resize the active loop_len later without realloc. 8 bars @ 60 BPM. */
@@ -289,6 +296,13 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
 
     /* Stage 2: Granular processes the loop signal only (live signal stays clean). */
     granular_process(inst->granular, loop_l, loop_r, gran_l, gran_r, frames);
+    /* Apply user gran_level — affects both layered (wet bus) and reverb input. */
+    if (inst->gran_level != 1.0f) {
+        for (int i = 0; i < frames; i++) {
+            gran_l[i] *= inst->gran_level;
+            gran_r[i] *= inst->gran_level;
+        }
+    }
 
     /* Scatter knob is dual-purpose:
      *   0..0.5  : clean loop at full + shimmer ramping in (layered shimmer)
@@ -310,6 +324,12 @@ static void amb_process(void *vp, int16_t *audio_inout, int frames) {
      * freeze layer that doesn't depend on Loop Layer being on. Output is
      * just the loop content (no dry passthrough); caller adds dry separately. */
     microloop_process(inst->microloop, dry_l, dry_r, micro_l, micro_r, frames);
+    if (inst->micro_level != 1.0f) {
+        for (int i = 0; i < frames; i++) {
+            micro_l[i] *= inst->micro_level;
+            micro_r[i] *= inst->micro_level;
+        }
+    }
 
     /* Reverb input = dry + layered (loop/shimmer) + micro (freeze). */
     for (int i = 0; i < frames; i++) {
@@ -365,6 +385,14 @@ static void amb_set_state(amb_instance_t *inst, const char *val) {
     if (json_get_int  (val, "lofi_tails",     &i) == 0) {
         inst->lofi_tails_on = i ? 1 : 0;
         reverb_set_stretch(inst->reverb, inst->lofi_tails_on);
+    }
+    if (json_get_float(val, "gran_level",     &f) == 0) {
+        if (f < 0.0f) f = 0.0f; if (f > 1.0f) f = 1.0f;
+        inst->gran_level = f;
+    }
+    if (json_get_float(val, "micro_level",    &f) == 0) {
+        if (f < 0.0f) f = 0.0f; if (f > 1.0f) f = 1.0f;
+        inst->micro_level = f;
     }
     if (json_get_int  (val, "mode",           &i) == 0)
         inst->mode = (i < 0 ? 0 : (i >= AMB_MODE_COUNT ? AMB_MODE_COUNT - 1 : i));
@@ -442,6 +470,20 @@ static void amb_set_param(void *vp, const char *key, const char *val) {
         reverb_set_stretch(inst->reverb, inst->lofi_tails_on);
         return;
     }
+    if (strcmp(key, "gran_level") == 0) {
+        float v = (float)atof(val);
+        if (v < 0.0f) v = 0.0f;
+        if (v > 1.0f) v = 1.0f;
+        inst->gran_level = v;
+        return;
+    }
+    if (strcmp(key, "micro_level") == 0) {
+        float v = (float)atof(val);
+        if (v < 0.0f) v = 0.0f;
+        if (v > 1.0f) v = 1.0f;
+        inst->micro_level = v;
+        return;
+    }
     if (strcmp(key, "mod_shape") == 0) {
         int s = atoi(val);
         inst->mod_shape = (s < 0 ? 0 : (s > 2 ? 2 : s));
@@ -494,6 +536,8 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
     else if (strcmp(key, "mod_sync") == 0)       n = snprintf(buf, buf_len, "%d", inst->mod_sync);
     else if (strcmp(key, "mod_shape") == 0)      n = snprintf(buf, buf_len, "%d", inst->mod_shape);
     else if (strcmp(key, "lofi_tails") == 0)     n = snprintf(buf, buf_len, "%d", inst->lofi_tails_on);
+    else if (strcmp(key, "gran_level") == 0)     n = snprintf(buf, buf_len, "%.2f", inst->gran_level);
+    else if (strcmp(key, "micro_level") == 0)    n = snprintf(buf, buf_len, "%.2f", inst->micro_level);
     else if (strcmp(key, "mode") == 0)        n = snprintf(buf, buf_len, "%d", inst->mode);
     else if (strcmp(key, "mode_count") == 0)  n = snprintf(buf, buf_len, "%d", AMB_MODE_COUNT);
     else if (strcmp(key, "mode_name") == 0)
@@ -507,12 +551,14 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
             "\"micro_hold\":%.4f,\"decay\":%.4f,\"mod_depth\":%.4f,\"mod_rate\":%.4f,"
             "\"mod_sync\":%d,\"mod_shape\":%d,"
             "\"lofi_tails\":%d,"
+            "\"gran_level\":%.4f,\"micro_level\":%.4f,"
             "\"loop_length\":%.2f}",
             inst->mode,
             inst->mix, inst->loop_layer, inst->grain_size, inst->scatter,
             inst->micro_hold, inst->decay, inst->mod_depth, inst->mod_rate,
             inst->mod_sync, inst->mod_shape,
             inst->lofi_tails_on,
+            inst->gran_level, inst->micro_level,
             inst->loop_length_bars);
     }
     else if (strcmp(key, "chain_params") == 0) {
@@ -530,6 +576,8 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
             "{\"key\":\"mod_sync\",\"name\":\"Tempo Sync\",\"type\":\"int\",\"min\":0,\"max\":1},"
             "{\"key\":\"mod_shape\",\"name\":\"Mod Shape\",\"type\":\"enum\",\"options\":[\"Sine\",\"Warp\",\"Sink\"]},"
             "{\"key\":\"lofi_tails\",\"name\":\"Lo-Fi Tails\",\"type\":\"int\",\"min\":0,\"max\":1},"
+            "{\"key\":\"gran_level\",\"name\":\"Granular Level\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.05},"
+            "{\"key\":\"micro_level\",\"name\":\"Micro-Loop Level\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.05},"
             "{\"key\":\"loop_length\",\"name\":\"Loop Length\",\"type\":\"float\",\"min\":0.5,\"max\":8,\"step\":0.5,\"unit\":\"bars\"}"
             "]");
     }
@@ -562,6 +610,8 @@ static int amb_get_param(void *vp, const char *key, char *buf, int buf_len) {
                   "\"knobs\":[],"
                   "\"params\":["
                     "{\"key\":\"loop_length\",\"label\":\"Loop Length\"},"
+                    "{\"key\":\"gran_level\",\"label\":\"Granular Level\"},"
+                    "{\"key\":\"micro_level\",\"label\":\"Micro-Loop Level\"},"
                     "{\"key\":\"mod_shape\",\"label\":\"Mod Shape\"},"
                     "{\"key\":\"mod_sync\",\"label\":\"Tempo Sync\"},"
                     "{\"key\":\"lofi_tails\",\"label\":\"Lo-Fi Tails\"}"
