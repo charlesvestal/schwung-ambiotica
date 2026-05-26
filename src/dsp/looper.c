@@ -143,11 +143,14 @@ void looper_process(looper_t *l,
         }
 
         /* Write input + feedback back into the buffer at write_pos.
-         * Soft-saturate so the loop can't blow up under sustained input + fb
-         * — tanh-style curve instead of hard clip so accumulated buffer
-         * content rolls off smoothly rather than clicking at the ceiling. */
-        l->buf_L[pos] = soft_sat(in_l[n] + fb_curr * loopL);
-        l->buf_R[pos] = soft_sat(in_r[n] + fb_curr * loopR);
+         * Normalized feedback formula: buf = (1-fb)*in + fb*old. At steady
+         * state buffer content converges to input level — no buildup, no
+         * runaway. At fb=1.0 the input term goes to zero, naturally freezing
+         * the buffer (true looper). soft_sat kept as safety against
+         * transient peaks. */
+        float in_g = 1.0f - fb_curr;
+        l->buf_L[pos] = soft_sat(in_g * in_l[n] + fb_curr * loopL);
+        l->buf_R[pos] = soft_sat(in_g * in_r[n] + fb_curr * loopR);
 
         /* Output: ONLY the loop signal (no dry). Caller mixes dry separately. */
         out_l[n] = fb_curr * loopL;
